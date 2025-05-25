@@ -5,6 +5,7 @@ import sys
 import logging
 from datetime import datetime
 import pandas as pd
+import time
 
 # Add parent directory to path for imports
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -32,6 +33,8 @@ if 'assistant' not in st.session_state:
     st.session_state.chat_history = []
     st.session_state.current_papers = []
     st.session_state.api_key_set = bool(api_key)
+    st.session_state.is_generating = False
+    st.session_state.uploading_in_chat = False
 
 # Helper functions
 
@@ -185,69 +188,194 @@ with st.sidebar:
 if page == "Chat Assistant":
     st.header("Research Paper Chat Assistant")
 
+    # Check for active paper chat
+    active_paper_chat = st.session_state.assistant.session_memory.get(
+        "active_paper_chat")
+    if active_paper_chat:
+        st.info(
+            f"🔍 You're currently in a paper-specific chat with: **{active_paper_chat.get('title', 'Unknown Paper')}**. Type 'exit chat' to return to the main chat.")
+
+    # Handle file upload in chat if requested
+    if st.session_state.uploading_in_chat:
+        col1, col2 = st.columns([5, 1])
+        with col1:
+            uploaded_file = st.file_uploader(
+                "Upload a PDF research paper", type="pdf", key="chat_upload")
+        with col2:
+            if st.button("Cancel Upload"):
+                st.session_state.uploading_in_chat = False
+                st.rerun()
+
+        if uploaded_file:
+            with st.spinner("Processing paper..."):
+                result = st.session_state.assistant.upload_paper(uploaded_file)
+
+                if result["success"]:
+                    st.session_state.chat_history.append({
+                        "role": "assistant",
+                        "content": f"✅ Successfully uploaded and processed: **{result['title']}**\n\n"
+                        f"**Authors:** {', '.join(result['authors']) if result['authors'] else 'Unknown'}\n\n"
+                        f"**Abstract:** {result['abstract'][:300]}..."
+                    })
+                    st.session_state.uploading_in_chat = False
+                    st.rerun()
+                else:
+                    error_msg = result.get('message', 'Unknown error')
+                    st.session_state.chat_history.append({
+                        "role": "assistant",
+                        "content": f"❌ Failed to upload paper: {error_msg}"
+                    })
+                    st.session_state.uploading_in_chat = False
+                    st.rerun()
+
     # Display chat history
-    for message in st.session_state.chat_history:
-        role = message["role"]
-        content = message["content"]
+    chat_container = st.container()
+    with chat_container:
+        for message in st.session_state.chat_history:
+            role = message["role"]
+            content = message["content"]
 
-        if role == "user":
-            st.markdown(f"**You:** {content}")
-        else:
-            st.markdown(f"**Assistant:** {content}")
+            if role == "user":
+                st.markdown(f"**You:** {content}")
+            else:
+                # Handle different types of assistant responses
+                if message.get("type") == "paper_chat":
+                    with st.container():
+                        st.markdown(f"**Assistant (Paper Chat):** {content}")
+                        if "sources" in message:
+                            with st.expander("View sources from paper"):
+                                for source in message["sources"]:
+                                    st.markdown(f"```\n{source['text']}\n```")
+                                    if "metadata" in source:
+                                        st.markdown(
+                                            f"*Page {source['metadata'].get('page', 'unknown')}*")
 
-    # Input for new messages
-    user_input = st.chat_input("Ask a question about research papers...")
+                elif message.get("action") == "search_results":
+                    st.markdown(f"**Assistant:** {content}")
+                    if message.get("results"):
+                        with st.expander("View search results"):
+                            for i, paper in enumerate(message["results"], 1):
+                                st.markdown(f"**{i}. {paper.get('title')}**")
+                                st.markdown(
+                                    f"Source: {paper.get('search_source', 'Unknown')}")
+                                if paper.get('abstract'):
+                                    st.markdown(
+                                        f"Abstract: {paper.get('abstract')[:200]}...")
+                                st.markdown("---")
 
-    if user_input:
-        # Add user message to history
-        st.session_state.chat_history.append(
-            {"role": "user", "content": user_input})
+                elif message.get("action") == "comparison_result":
+                    st.markdown(f"**Assistant:** {content}")
+                    result = message.get("result", {})
+                    if result.get("success"):
+                        with st.expander("View detailed comparison"):
+                            st.markdown(result["comparison"])
+                    else:
+                        st.error(result.get(
+                            "message", "Failed to generate comparison"))
 
-        # Process query
-        with st.spinner("Processing your query..."):
+                else:
+                    st.markdown(f"**Assistant:** {content}")
+
+    # Show loading indicator while generating
+    if st.session_state.is_generating:
+        with st.container():
+            st.markdown("**Assistant:** _Generating response..._")
+            progress_bar = st.progress(0)
+            for i in range(100):
+                time.sleep(0.01)
+                progress_bar.progress(i + 1)
+
+            # Check if generation is complete
+            if not st.session_state.assistant.check_generation_status():
+                st.session_state.is_generating = False
+                st.rerun()
+
+    # Chat input area
+    input_container = st.container()
+    with input_container:
+        cols = st.columns([6, 1])
+
+        with cols[0]:
+            user_input = st.chat_input(
+                "Ask a question, search papers, or request a comparison...",
+                key="chat_input"
+            )
+
+        with cols[1]:
+            upload_button = st.button(
+                "📄 Upload", help="Upload a research paper")
+            if upload_button:
+                st.session_state.uploading_in_chat = True
+                st.rerun()
+
+        if user_input:
+            # Add user message to history
+            st.session_state.chat_history.append(
+                {"role": "user", "content": user_input}
+            )
+
+            # Process query - do this before setting generating flag and rerunning
             response = st.session_state.assistant.process_natural_language_query(
                 user_input)
 
-        # Handle different response types
-        if response["action"] == "upload_prompt":
-            st.session_state.chat_history.append(
-                {"role": "assistant", "content": response["message"]})
-            # Auto-switch to upload page
-            st.switch_page(page)
+            # Handle different response types
+            if response["action"] == "upload_prompt":
+                st.session_state.chat_history.append(
+                    {"role": "assistant", "content": response["message"]}
+                )
+                st.session_state.uploading_in_chat = True
 
-        elif response["action"] == "tool_results":
-            # Display base message
-            st.session_state.chat_history.append(
-                {"role": "assistant", "content": response["message"]})
+            elif response["action"] == "search_results":
+                st.session_state.chat_history.append({
+                    "role": "assistant",
+                    "content": response["message"],
+                    "action": "search_results",
+                    "results": response["results"]
+                })
 
-            # Process and display results
-            for result in response.get("results", []):
-                tool_name = result["tool"]
-                result_data = result["result"]
+            elif response["action"] == "comparison_result":
+                st.session_state.chat_history.append({
+                    "role": "assistant",
+                    "content": "Here's the comparison you requested:",
+                    "action": "comparison_result",
+                    "result": response["result"]
+                })
 
-                if tool_name in ["internal_search", "web_search", "conference_search"]:
-                    # Update current papers for comparison
-                    st.session_state.current_papers = result_data
+            elif response["action"] == "paper_chat_start":
+                st.session_state.chat_history.append({
+                    "role": "assistant",
+                    "content": response["message"],
+                    "paper": response["paper"]
+                })
 
-                    # Show results
-                    result_message = f"## Search Results\nFound {len(result_data)} papers:\n\n"
-                    for i, paper in enumerate(result_data[:5]):  # Show top 5
-                        title = paper.get('title', 'Unknown Title')
-                        result_message += f"{i+1}. {title}\n"
+            elif response["action"] == "paper_chat_response":
+                st.session_state.chat_history.append({
+                    "role": "assistant",
+                    "content": response["message"],
+                    "sources": response.get("sources", []),
+                    "paper": response["paper"],
+                    "type": "paper_chat"
+                })
 
-                    st.session_state.chat_history.append(
-                        {"role": "assistant", "content": result_message})
+            elif response["action"] == "tool_results":
+                st.session_state.chat_history.append({
+                    "role": "assistant",
+                    "content": response["message"]
+                })
 
-                elif tool_name == "compare_papers":
-                    # Result is already a formatted comparison
-                    if isinstance(result_data, str):
-                        st.session_state.chat_history.append(
-                            {"role": "assistant", "content": result_data})
-        else:
-            # Simple response
-            st.session_state.chat_history.append(
-                {"role": "assistant", "content": response["message"]})
+                for result in response.get("results", []):
+                    if isinstance(result.get("result"), list):
+                        st.session_state.current_papers = result["result"]
 
+            else:
+                st.session_state.chat_history.append({
+                    "role": "assistant",
+                    "content": response["message"]
+                })
+
+            # Now set the generating flag to False and rerun
+            st.session_state.is_generating = False
+            st.rerun()
 elif page == "Upload Papers":
     st.header("Upload Research Papers")
 
@@ -289,6 +417,19 @@ elif page == "Upload Papers":
             except Exception as e:
                 st.error(f"An error occurred during upload: {str(e)}")
                 logging.exception("Unexpected error during paper upload:")
+
+    with st.expander("View Uploaded Papers", expanded=True):
+        st.subheader("Your Uploaded Papers")
+
+        # Get uploaded papers from the assistant's database
+        uploaded_papers = st.session_state.assistant.db.get_all_papers()
+
+        if not uploaded_papers:
+            st.info(
+                "No papers uploaded yet. Use the section above to upload a paper.")
+        else:
+            for i, paper in enumerate(uploaded_papers):
+                display_paper(paper, i, allow_delete=True)
 
 elif page == "Search Papers":
     st.header("Search for Research Papers")

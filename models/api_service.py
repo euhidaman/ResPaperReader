@@ -1,19 +1,19 @@
 import arxiv
-import semanticscholar as sch
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime
 import time
+import requests
+import os
 
 
 class APIService:
     def __init__(self):
-        """Initialize the API service for external paper sources."""
-        self.client = sch.SemanticScholar()
+        """Initialize the API service for arXiv paper searches."""
         self.rate_limit_delay = 1  # seconds between requests
 
-    def search_arxiv(self, query, max_results=5):
+    def search_arxiv(self, query, max_results=10):
         """
-        Search for papers on arXiv.
+        Search for papers on arXiv with improved relevance sorting.
 
         Args:
             query: Search query
@@ -23,78 +23,83 @@ class APIService:
             List of papers with metadata
         """
         try:
-            # Configure search client
-            search = arxiv.Search(
-                query=query,
-                max_results=max_results,
-                sort_by=arxiv.SortCriterion.SubmittedDate
-            )
+            # Try multiple search strategies for better results
+            search_strategies = [
+                f'ti:"{query}"',  # Exact title match
+                f'ti:{query}',    # Title search
+                f'all:{query}',   # All fields search
+            ]
 
-            papers = []
-            for result in search.results():
-                papers.append({
-                    'title': result.title,
-                    'abstract': result.summary,
-                    'authors': [author.name for author in result.authors],
-                    'url': result.entry_id,
-                    'pdf_url': result.pdf_url,
-                    'source': 'arxiv',
-                    'published': result.published.strftime('%Y-%m-%d') if result.published else None
-                })
+            all_papers = []
+            seen_titles = set()
 
-            return papers
+            for search_query in search_strategies:
+                try:
+                    search = arxiv.Search(
+                        query=search_query,
+                        max_results=max_results,
+                        sort_by=arxiv.SortCriterion.Relevance
+                    )
+
+                    for result in search.results():
+                        title_lower = result.title.lower()
+                        if title_lower not in seen_titles:
+                            seen_titles.add(title_lower)
+                            all_papers.append({
+                                'title': result.title,
+                                'abstract': result.summary,
+                                'authors': [author.name for author in result.authors],
+                                'url': result.entry_id,
+                                'pdf_url': result.pdf_url,
+                                'source': 'arxiv',
+                                'published': result.published.strftime('%Y-%m-%d') if result.published else None,
+                                'arxiv_id': result.entry_id.split('/')[-1]
+                            })
+
+                    # If we found exact matches in title search, prioritize those
+                    if search_query.startswith('ti:') and all_papers:
+                        break
+
+                except Exception as e:
+                    logging.warning(
+                        f"Search strategy '{search_query}' failed: {e}")
+                    continue
+
+            return all_papers[:max_results]
+
         except Exception as e:
             logging.error(f"Error searching arXiv: {e}")
             return []
 
-    def search_semantic_scholar(self, query, max_results=5):
+    def download_paper_pdf(self, pdf_url, save_path):
         """
-        Search for papers on Semantic Scholar.
+        Download a paper PDF from arXiv.
 
         Args:
-            query: Search query
-            max_results: Maximum number of results to return
+            pdf_url: URL of the PDF to download
+            save_path: Local path to save the PDF
 
         Returns:
-            List of papers with metadata
+            Boolean indicating success
         """
         try:
-            papers = []
+            response = requests.get(pdf_url, stream=True)
+            response.raise_for_status()
 
-            # Use the Semantic Scholar API
-            results = self.client.search_paper(query, limit=max_results)
-            time.sleep(self.rate_limit_delay)  # Respect rate limits
+            os.makedirs(os.path.dirname(save_path), exist_ok=True)
 
-            for paper in results:
-                # Get more details for this paper
-                if paper.get('paperId'):
-                    try:
-                        details = self.client.get_paper(paper.get('paperId'))
-                        # Respect rate limits
-                        time.sleep(self.rate_limit_delay)
-                    except Exception as e:
-                        logging.error(f"Error getting paper details: {e}")
-                        details = paper
-                else:
-                    details = paper
+            with open(save_path, 'wb') as f:
+                for chunk in response.iter_content(chunk_size=8192):
+                    f.write(chunk)
 
-                papers.append({
-                    'title': details.get('title', 'Unknown Title'),
-                    'abstract': details.get('abstract', ''),
-                    'authors': [author.get('name', 'Unknown') for author in details.get('authors', [])],
-                    'url': f"https://www.semanticscholar.org/paper/{details.get('paperId', '')}" if details.get('paperId') else None,
-                    'source': 'semantic_scholar',
-                    'year': details.get('year')
-                })
-
-            return papers
+            return True
         except Exception as e:
-            logging.error(f"Error searching Semantic Scholar: {e}")
-            return []
+            logging.error(f"Error downloading PDF: {e}")
+            return False
 
     def search_papers_by_conference(self, conf_name, year=None, max_results=10):
         """
-        Search for papers from a specific conference.
+        Search for papers from a specific conference on arXiv.
 
         Args:
             conf_name: Conference name (e.g., 'ICLR', 'NeurIPS', 'ACL')
@@ -110,29 +115,4 @@ class APIService:
 
         # Format query for arXiv
         query = f"{conf_name} {year}"
-
-        # Get results from both sources
-        arxiv_results = self.search_arxiv(query, max_results=max_results)
-        scholar_results = self.search_semantic_scholar(
-            query, max_results=max_results)
-
-        # Combine results (with deduplication based on title)
-        seen_titles = set()
-        combined_results = []
-
-        # Process arXiv results first
-        for paper in arxiv_results:
-            # Use first 100 chars of title as key
-            title_key = paper['title'].lower()[:100]
-            if title_key not in seen_titles:
-                seen_titles.add(title_key)
-                combined_results.append(paper)
-
-        # Add unique Semantic Scholar results
-        for paper in scholar_results:
-            title_key = paper['title'].lower()[:100]
-            if title_key not in seen_titles:
-                seen_titles.add(title_key)
-                combined_results.append(paper)
-
-        return combined_results[:max_results]
+        return self.search_arxiv(query, max_results=max_results)

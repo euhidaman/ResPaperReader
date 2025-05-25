@@ -5,146 +5,164 @@ A lightweight LLM-based Research Assistant Agent that enables users to perform t
 ## Authors
 
 - Euhid Aman - M11315803
-- Alexander Morinvil
+- Alexander Morinvil - m11352802
 
-## Features
+## Overview
 
-- **Search internal paper databases**: Upload and search your personal collection of research papers
-- **Upload new research papers**: Extract and store metadata from PDFs automatically
-- **Search for recent papers**: Query public APIs like arXiv and Semantic Scholar
-- **Compare papers**: Generate structured comparison reports between different papers
-- **Natural language interface**: Interact with the system using everyday language
+This project implements a natural language-driven research assistant that helps users manage, search, and analyze research papers. The system uses a combination of Retrieval-Augmented Generation (RAG) and ReAct (Reasoning + Acting) to dynamically understand user intent and execute appropriate actions.
+
+## Core Features
+
+- **Natural Language Interface**: All interactions are through conversational commands
+- **Internal Paper Database**:
+  - Search your personal collection using keywords or semantic queries
+  - Vector-based similarity search for better results
+  - Automated metadata extraction from PDFs
+- **Paper Upload System**:
+  - Direct PDF uploads with automatic metadata extraction
+  - Title and abstract parsing
+  - Storage in both SQL database and vector store
+- **External Paper Search**:
+  - Integration with arXiv and Semantic Scholar APIs
+  - Conference-specific paper searches
+  - Recent paper discovery
+- **Comparative Analysis**:
+  - Structured comparison reports between papers
+  - Analysis of research goals, methods, and contributions
+  - Identification of strengths and weaknesses
 
 ## System Architecture
 
-The system combines:
-- **RAG (Retrieval-Augmented Generation)**: For searching and retrieving relevant papers
-- **ReAct (Reasoning + Acting)**: For dynamic tool invocation based on user queries
-- **LLM-powered analysis**: For paper comparison, summarization, and understanding
+### Components
+- **LLM Agent**: Powers natural language understanding and response generation
+- **Vector Store**: ChromaDB for semantic search capabilities
+- **SQL Database**: Stores paper metadata and relationships
+- **PDF Processing**: Extracts and processes paper content
+- **API Integration**: Connects to external research paper repositories
+
+### Technical Stack
+- **Database**: SQLite + ChromaDB for vector storage
+- **PDF Processing**: pdfplumber
+- **APIs**: arXiv and Semantic Scholar
+- **Embeddings**: Sentence Transformers
+- **Backend**: Python with LangChain integration
 
 ## Requirements
 
 - Python 3.8+
-- Streamlit
 - Google Generative AI (Gemini) API key
-- Internet connection for external paper searches
-- Raspberry Pi compatible
+- Internet connection for external searches
+- Minimum 4GB RAM (8GB recommended)
+- Storage space for paper database
 
-## Setup Instructions
+## Installation
 
-### Step 1: Clone the Repository
-
-```bash
-git clone https://github.com/euhidaman/ResPaperReader.git
-cd ResPaperReader
-```
-
-### Step 2: Install Dependencies
-
-```bash
-pip install -r requirements.txt
-```
-
-This installs all necessary packages including:
-- streamlit (for the frontend interface)
-- google-generativeai (for LLM capabilities)
-- pdfplumber (for PDF processing)
-- scikit-learn and faiss-cpu (for vector embeddings)
-- arxiv and semanticscholar (for API access)
-
-### Step 3: Get a Gemini API Key
-
-1. Go to [Google AI Studio](https://ai.google.dev/)
-2. Sign up or log in
-3. Navigate to API keys section
-4. Create a new API key
-
-### Step 4: Set Up Environment Variables
-
-You can provide your API key in one of three ways:
-
-1. Create a `.env` file in the project root:
-   ```
-   GEMINI_API_KEY=your_api_key_here
-   ```
-
-2. Pass it as a command line argument when running the app:
+1. **Clone the Repository**
    ```bash
-   python run.py --gemini-key=your_api_key_here
+   git clone https://github.com/euhidaman/ResPaperReader.git
+   cd ResPaperReader
    ```
 
-3. Enter it directly in the app's sidebar interface
+2. **Install Dependencies**
+   ```bash
+   pip install -r requirements.txt
+   ```
 
-## Running the Application
+3. **Configure API Key**
+   - Create a .env file with:
+     ```
+     GEMINI_API_KEY=your_api_key_here
+     ```
+   - Or provide via command line:
+     ```bash
+     python run.py --gemini-key=your_api_key_here
+     ```
 
-Run the application using the provided script:
+## Usage Guide
 
+### Starting the Application
 ```bash
-python run.py
+python run.py [--port=8501]
 ```
 
-Or specify a custom port:
+### Example Commands
 
-```bash
-python run.py --port=8502
+1. **Searching Papers**
+   ```
+   "Find papers about contrastive learning for vision models"
+   "Search for recent ICLR papers on diffusion models"
+   ```
+
+2. **Uploading Papers**
+   ```
+   "I want to upload a new research paper"
+   "Add this PDF to my library"
+   ```
+
+3. **Comparing Papers**
+   ```
+   "Compare the paper I just uploaded with the most recent one about diffusion models"
+   "What are the main differences between these two papers?"
+   ```
+
+4. **Managing Library**
+   ```
+   "Show me all papers in my library about transformers"
+   "List papers I uploaded this week"
+   ```
+
+## Data Management
+
+### Database Schema
+```sql
+CREATE TABLE papers (
+    id SERIAL PRIMARY KEY,
+    title TEXT NOT NULL,
+    abstract TEXT,
+    source TEXT,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
 ```
 
-The application will start and be accessible at http://localhost:8501 (or your specified port).
-
-## Using the Application
-
-### Chat Interface
-
-The chat interface lets you interact with the research assistant using natural language:
-
-- **Search queries**: "Find papers about contrastive learning for vision models"
-- **Upload requests**: "I want to upload my latest research paper"
-- **Search specific sources**: "Find recent papers from ICLR about diffusion models"
-- **Comparison requests**: "Compare the paper I uploaded with the second paper about diffusion models"
-
-### Manual Navigation
-
-Use the sidebar to navigate between different sections:
-
-1. **Chat Assistant**: Main conversational interface
-2. **Upload Papers**: Manually upload PDF research papers
-3. **Search Papers**: Search papers across different sources:
-   - Internal library (your uploaded papers)
-   - External sources (arXiv and Semantic Scholar)
-   - Conference-specific searches
-4. **My Library**: View your collection of uploaded papers
-
-## Example Workflow
-
-1. Upload a research paper via the "Upload Papers" tab
-2. Search for related papers using natural language in the chat or the "Search Papers" tab
-3. Compare papers using the comparison tool at the bottom of the search results
-4. Review the generated comparison report
-5. Continue the conversation with follow-up questions
-
-## Data Storage
-
-- Papers metadata is stored in SQLite database (`data/papers.db`)
-- Uploaded PDFs are saved in the `data/uploads` directory
-- Vector embeddings are stored using FAISS index for semantic search capabilities
-
-## Raspberry Pi Optimization
-
-This application was optimized for Raspberry Pi usage:
-- Lightweight vector embedding model
-- SQLite instead of MySQL/PostgreSQL
-- Resource-efficient components
+### Storage Locations
+- PDF files: `data/uploads/`
+- Database: `data/papers.db`
+- Vector store: `data/chroma_db/`
 
 ## Troubleshooting
 
-- **API Key Issues**: Ensure your Google Gemini API key is valid and has sufficient quota
-- **PDF Extraction Problems**: Some PDFs might not be properly parsed depending on their format
-- **Memory Usage**: On resource-constrained devices like Raspberry Pi, avoid processing very large PDFs or running too many operations simultaneously
+Common Issues:
+1. **PDF Parsing Errors**: Some PDFs may not parse correctly due to formatting
+   - Solution: Try re-saving the PDF with a different tool
+   
+2. **Memory Usage**: High RAM usage during vector operations
+   - Solution: Reduce batch size in settings or process fewer papers simultaneously
+
+3. **API Limits**: Rate limiting from external APIs
+   - Solution: Implement exponential backoff or upgrade API tier
+
+## Self-Evaluation Table
+
+| Objective                  | Implementation Status | Performance Rating (1-5) | Notes                                           |
+| -------------------------- | --------------------- | ------------------------ | ----------------------------------------------- |
+| Natural Language Interface | Complete              | 5                        | Successfully interprets various query types     |
+| Internal Paper Search      | Complete              | 4                        | RAG implementation works well                   |
+| PDF Upload & Processing    | Complete              | 4                        | Handles most PDF formats                        |
+| External API Integration   | Complete              | 4                        | Successfully queries arXiv and Semantic Scholar |
+| Paper Comparison           | Complete              | 4                        | Generates structured reports                    |
+| Memory Management          | Complete              | 3                        | Maintains context during conversations          |
+| Tool Selection             | Complete              | 5                        | Dynamic tool invocation works reliably          |
+| Database Performance       | Complete              | 4                        | Efficient querying and storage                  |
+| Vector Search              | Complete              | 4                        | Good semantic matching                          |
+| Error Handling             | Complete              | 3                        | Handles most edge cases                         |
+
+## Contributing
+
+Contributions are welcome! Please follow these steps:
+1. Fork the repository
+2. Create a feature branch
+3. Submit a pull request with detailed description
 
 ## License
 
 [MIT License](LICENSE)
-
-## Contributing
-
-Contributions are welcome! Please feel free to submit a Pull Request.

@@ -114,7 +114,7 @@ If you need to use a tool, output it in the format: <tool>tool_name(parameters)<
 
         prompt = ChatPromptTemplate.from_messages([
             SystemMessage(
-                content="You are a research paper analysis assistant that extracts key information from papers."),
+                content="You are a research paper analysis assistant that extracts key information from papers. Your responses should be clear, direct, and free of meta-commentary. Do not include phrases like 'Based on the paper', 'From the information provided', or 'Since the paper is about'. Just provide the analysis directly."),
             HumanMessage(content=f"""Analyze the following research paper and extract key information:
 {content}
 
@@ -133,6 +133,10 @@ Format your response as a structured report with clear headings.
         try:
             chain = prompt | self.llm | self.output_parser
             analysis = chain.invoke({})
+
+            # Clean out any potential reasoning patterns
+            analysis = self._clean_response(analysis)
+
             return {
                 "analysis": analysis,
                 "title": title
@@ -140,6 +144,30 @@ Format your response as a structured report with clear headings.
         except Exception as e:
             logging.error(f"Error generating paper analysis: {e}")
             return {"error": str(e)}
+
+    def _clean_response(self, response):
+        """Clean up the response to remove internal reasoning patterns."""
+        import re
+
+        # Remove common reasoning patterns
+        patterns_to_remove = [
+            r"(?:Based on|According to|From) the (?:paper|text|information provided|abstract|title).*?(?:[\.\n]|$)",
+            r"Since the paper is (?:about|on|related to).*?(?:[\.\n]|$)",
+            r"This paper (?:appears to|seems to|is about).*?(?:[\.\n]|$)",
+            r"From what I can (?:see|understand|gather).*?(?:[\.\n]|$)",
+            r"The paper discusses.*?(?:[\.\n]|$)",
+            r"From the (?:given|provided) (?:information|text|abstract|excerpt).*?(?:[\.\n]|$)",
+            r"If that fails.*?(?:[\.\n]|$)",
+        ]
+
+        for pattern in patterns_to_remove:
+            response = re.sub(pattern, "", response, flags=re.IGNORECASE)
+
+        # Clean up whitespace
+        response = re.sub(r'\n\s*\n', '\n\n', response)
+        response = response.strip()
+
+        return response
 
     def compare_papers(self, paper1, paper2):
         """

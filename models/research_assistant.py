@@ -31,6 +31,9 @@ class ResearchAssistant:
         self.agent = GeminiAgent(api_key=gemini_api_key)
         self.api_key = gemini_api_key or os.environ.get("GEMINI_API_KEY")
 
+        # Flag to indicate if response is being generated
+        self.is_generating = False
+
         # Initialize the LLM
         try:
             self.llm = ChatGoogleGenerativeAI(
@@ -43,7 +46,9 @@ class ResearchAssistant:
         self.session_memory = {
             "uploaded_papers": [],
             "search_results": [],
-            "last_comparison": None
+            "last_comparison": None,
+            "active_paper_chat": None,
+            "pending_upload": False
         }
 
         # Initialize LangChain tools and agent
@@ -61,7 +66,7 @@ class ResearchAssistant:
             Tool(
                 name="web_search",
                 func=self.search_web_papers,
-                description="Search for papers using external APIs like arXiv and Semantic Scholar"
+                description="Search for papers using arXiv API"
             ),
             Tool(
                 name="conference_search",
@@ -72,6 +77,21 @@ class ResearchAssistant:
                 name="compare_papers",
                 func=self.generate_paper_comparison,
                 description="Compare two research papers and generate a structured report"
+            ),
+            Tool(
+                name="chat_with_specific_paper",
+                func=self.initiate_paper_chat,
+                description="Start a conversation with a specific paper in your library"
+            ),
+            Tool(
+                name="request_paper_upload",
+                func=self.request_paper_upload,
+                description="Request to upload a new research paper"
+            ),
+            Tool(
+                name="store_paper",
+                func=self.store_paper_from_search,
+                description="Store a paper from search results into the database by providing the paper index"
             )
         ]
 
@@ -82,10 +102,11 @@ class ResearchAssistant:
             return
 
         try:
-            # Create system prompt
+            # Create system prompt that emphasizes direct responses
             system_prompt = """You are a Research Paper Assistant that helps users find, analyze, and compare research papers.
             You can understand natural language commands and use tools to find relevant information.
-            Always be concise and focus on academic research needs. Format your responses in a clear, informative way.
+            Always respond directly and concisely. Never expose your reasoning process or tool usage.
+            Provide clean, helpful responses without mentioning tools or internal processes.
             """
 
             # Create prompt template
@@ -96,14 +117,18 @@ class ResearchAssistant:
                 MessagesPlaceholder(variable_name="agent_scratchpad")
             ])
 
-            # Create agent
-            agent = create_react_agent(self.llm, self.tools, prompt)
+            # Create agent with verbose=False
+            agent = create_react_agent(
+                self.llm, self.tools, prompt, verbose=False)
 
-            # Create agent executor
+            # Create agent executor with all verbose settings disabled
             self.agent_executor = AgentExecutor(
                 agent=agent,
                 tools=self.tools,
-                verbose=True
+                verbose=False,
+                return_intermediate_steps=False,
+                max_iterations=3,
+                early_stopping_method="generate"
             )
 
             logging.info("Successfully initialized LangChain agent")
@@ -122,6 +147,9 @@ class ResearchAssistant:
             Dict with paper information and success status
         """
         try:
+            # Reset pending upload flag
+            self.session_memory["pending_upload"] = False
+
             # Save the file
             file_path = self.pdf_processor.save_pdf(pdf_file)
             if not file_path:
@@ -226,23 +254,16 @@ class ResearchAssistant:
 
     def search_web_papers(self, query: str, source: str = None) -> List[Dict]:
         """
-        Search for papers using external APIs.
+        Search for papers using arXiv API.
 
         Args:
             query: Search query
-            source: Optional source to search (arxiv or semantic_scholar)
+            source: Optional source (only arxiv supported now)
 
         Returns:
             List of matching papers
         """
-        results = []
-        if source == "arxiv" or source is None:
-            arxiv_results = self.api_service.search_arxiv(query)
-            results.extend(arxiv_results)
-
-        if source == "semantic_scholar" or source is None:
-            scholar_results = self.api_service.search_semantic_scholar(query)
-            results.extend(scholar_results)
+        results = self.api_service.search_arxiv(query)
 
         # Update session memory
         self.session_memory["search_results"] = results
@@ -341,12 +362,12 @@ class ResearchAssistant:
                 search_kwargs={"k": 5, "filter": {"doc_id": paper_id}}
             )
 
-            # Create the chain
+            # Create the chain with verbose=False
             chain = ConversationalRetrievalChain.from_llm(
                 llm=self.llm,
                 retriever=retriever,
                 return_source_documents=True,
-                verbose=True
+                verbose=False
             )
 
             return chain
@@ -356,7 +377,7 @@ class ResearchAssistant:
 
     def process_natural_language_query(self, query: str) -> Dict:
         """
-        Process a natural language query from the user using LangChain agent.
+        Process a natural language query from the user using direct processing.
 
         Args:
             query: User's query
@@ -364,109 +385,262 @@ class ResearchAssistant:
         Returns:
             Response from the assistant
         """
-        if query.lower().startswith("upload"):
-            return {
-                "action": "upload_prompt",
-                "message": "Please upload a PDF file to continue."
-            }
-
-        if not self.agent_executor:
-            # Fall back to original implementation if LangChain agent isn't available
-            return self._legacy_process_query(query)
-
         try:
-            # Use LangChain agent executor to process the query
-            chat_history = []
+            query_lower = query.lower()
+
+            # Handle direct search requests
+            search_keywords = ["find", "search", "look for",
+                               "get me", "show me", "summary of", "summarize"]
+            paper_keywords = ["paper", "research", "article", "study"]
+
+            # Handle direct paper questions (e.g., "What is the paper X about?")
+            paper_question_patterns = [
+                r"what is (?:the )?paper ['\"]?([^\"']+)['\"]? about",
+                r"what's (?:the )?paper ['\"]?([^\"']+)['\"]? about",
+                r"(?:tell me|explain) about (?:the )?paper ['\"]?([^\"']+)['\"]",
+                r"(?:summarize|summarise) (?:the )?paper ['\"]?([^\"']+)['\"]"
+            ]
+
+            # First check if this is a direct question about a specific paper
+            paper_title = None
+            for pattern in paper_question_patterns:
+                match = re.search(pattern, query_lower)
+                if match:
+                    paper_title = match.group(1)
+                    break
+
+            # If we found a potential paper title, try to find it
+            if paper_title:
+                # Search for the paper in the database
+                papers = self.search_internal_papers(paper_title)
+                if papers:
+                    # Use the first (most relevant) match
+                    paper = papers[0]
+                    # Generate analysis of the paper
+                    analysis_result = self.analyze_paper(paper["id"])
+                    return {
+                        "action": "response",
+                        "message": analysis_result.get("analysis", "I couldn't analyze this paper effectively.")
+                    }
+
+            is_search_query = any(
+                keyword in query_lower for keyword in search_keywords)
+            mentions_paper = any(
+                keyword in query_lower for keyword in paper_keywords)
+
+            # Handle store paper requests
+            store_keywords = ["store", "save",
+                              "add to library", "download and store"]
+            if any(keyword in query_lower for keyword in store_keywords):
+                numbers = re.findall(r'\b(\d+)\b', query)
+                if numbers:
+                    paper_idx = numbers[0]
+                    result = self.store_paper_from_search(paper_idx)
+                    return {
+                        "action": "store_result",
+                        "result": result,
+                        "message": result.get("message", "Operation completed.")
+                    }
+                else:
+                    return {
+                        "action": "response",
+                        "message": "Please specify which paper to store by providing its index number (e.g., 'store paper 0' or 'save paper 1')."
+                    }
+
+            # Handle search queries directly
+            if is_search_query and mentions_paper:
+                # Extract the search term
+                search_term = self._extract_search_term(query, search_keywords)
+
+                if search_term:
+                    results = self.unified_search(search_term)
+                    return {
+                        "action": "search_results",
+                        "results": results,
+                        "message": self._format_search_results(results)
+                    }
+
+            # Handle paper comparison requests
+            if any(phrase in query.lower() for phrase in ["compare", "difference between", "versus", "vs"]):
+                papers = self._extract_paper_queries(query)
+                if papers:
+                    result = self.enhanced_paper_comparison(
+                        papers[0], papers[1])
+                    return {
+                        "action": "comparison_result",
+                        "result": result
+                    }
+
+            # Handle upload requests
+            upload_phrases = ["upload a paper", "upload paper",
+                              "add a paper", "add paper", "upload research", "upload pdf"]
+            if any(phrase in query.lower() for phrase in upload_phrases) or query.lower().startswith("upload"):
+                self.session_memory["pending_upload"] = True
+                return {
+                    "action": "upload_prompt",
+                    "message": "I'd be happy to help you upload a paper to your library. Please upload a PDF file to continue."
+                }
+
+            # Handle pending upload request
+            if self.session_memory.get("pending_upload"):
+                return {
+                    "action": "upload_prompt",
+                    "message": "Please upload a PDF file to continue."
+                }
+
+            # Check for active paper chat
+            active_paper = self.session_memory.get("active_paper_chat")
+            if active_paper:
+                paper_id = active_paper.get("id")
+                if paper_id:
+                    # Check for exit commands
+                    if any(exit_phrase in query.lower() for exit_phrase in ["exit chat", "leave chat", "stop chat", "back to main", "return to main"]):
+                        self.session_memory["active_paper_chat"] = None
+                        return {
+                            "action": "response",
+                            "message": "Exited paper chat. You're now back in the main chat interface."
+                        }
+
+                    # Continue with paper-specific chat
+                    response = self.chat_with_paper(paper_id, query)
+                    return {
+                        "action": "paper_chat_response",
+                        "message": response.get("response", "Error processing your question."),
+                        "sources": response.get("sources", []),
+                        "paper": active_paper
+                    }
+
+            # Handle specific paper chat initiation
+            chat_keywords = ["chat with", "talk to", "discuss", "ask about"]
+            if any(keyword in query_lower for keyword in chat_keywords):
+                # Extract paper name/query
+                paper_query = query
+                for keyword in chat_keywords:
+                    if keyword in query_lower:
+                        parts = query_lower.split(keyword, 1)
+                        if len(parts) > 1:
+                            paper_query = parts[1].strip()
+                            break
+
+                if paper_query:
+                    return self.initiate_paper_chat(paper_query)
+
+            # Handle general queries using Gemini agent (without LangChain)
             context = {
                 "uploaded_papers": [p.get("title") for p in self.session_memory["uploaded_papers"]],
                 "recent_searches": [p.get("title") for p in self.session_memory["search_results"]]
             }
 
-            # Add context to query
-            enhanced_query = f"{query}\n\nContext: {json.dumps(context)}"
+            # Use the Gemini agent directly for a clean response
+            response = self.agent.process_query(query, context)
 
-            # Execute agent
-            result = self.agent_executor.invoke(
-                {"input": enhanced_query, "chat_history": chat_history}
-            )
+            # Clean the response from any tool markup
+            cleaned_response = self._clean_response(response)
 
-            response = result["output"]
-
-            # Process results from tool calls
-            if "intermediate_steps" in result:
-                tools_used = []
-                for step in result["intermediate_steps"]:
-                    tool_name = step[0].tool
-                    tool_result = step[1]
-
-                    if isinstance(tool_result, list) and len(tool_result) > 0:  # Search results
-                        tools_used.append({
-                            "tool": tool_name,
-                            "result": tool_result
-                        })
-
-                if tools_used:
-                    return {
-                        "action": "tool_results",
-                        "results": tools_used,
-                        "message": response
-                    }
-
-            # Regular response (no tools used)
             return {
                 "action": "response",
-                "message": response
+                "message": cleaned_response
             }
 
         except Exception as e:
-            logging.error(f"Error in LangChain agent: {e}")
-            # Fall back to original implementation
-            return self._legacy_process_query(query)
-
-    def _legacy_process_query(self, query: str) -> Dict:
-        """Legacy query processing when LangChain agent isn't available."""
-        # Use the Gemini agent to determine intent and action
-        context = {
-            "uploaded_papers": [p.get("title") for p in self.session_memory["uploaded_papers"]],
-            "recent_searches": [p.get("title") for p in self.session_memory["search_results"]]
-        }
-
-        response = self.agent.process_query(query, context)
-
-        # Extract tool calls
-        tool_pattern = r"<tool>(\w+)\((.*?)\)</tool>"
-        tool_matches = re.findall(tool_pattern, response)
-
-        results = []
-        for tool_name, params_str in tool_matches:
-            # Parse parameters
-            params = {}
-            param_pattern = r'(\w+):\s*"([^"]*)"'
-            param_matches = re.findall(param_pattern, params_str)
-
-            for param_name, param_value in param_matches:
-                params[param_name] = param_value
-
-            # Execute tool if available
-            if hasattr(self, tool_name):
-                tool_func = getattr(self, tool_name)
-                tool_result = tool_func(**params)
-                results.append({
-                    "tool": tool_name,
-                    "result": tool_result
-                })
-
-        if results:
-            return {
-                "action": "tool_results",
-                "results": results,
-                "message": response.replace(tool_pattern, "")
-            }
-        else:
+            logging.error(f"Error processing query: {e}")
             return {
                 "action": "response",
-                "message": response
+                "message": f"I encountered an error: {str(e)}"
             }
+
+    def _extract_search_term(self, query: str, search_keywords: list) -> str:
+        """Extract the search term from a query."""
+        query_lower = query.lower()
+        search_term = query
+
+        for keyword in search_keywords:
+            if keyword in query_lower:
+                parts = query_lower.split(keyword, 1)
+                if len(parts) > 1:
+                    search_term = parts[1].strip()
+                    # Remove common words
+                    search_term = re.sub(
+                        r'\b(paper|the|a|an|for|me|of)\b', '', search_term).strip()
+                    # Remove quotes
+                    if (search_term.startswith("'") and search_term.endswith("'")) or \
+                       (search_term.startswith('"') and search_term.endswith('"')):
+                        search_term = search_term[1:-1]
+                    break
+
+        return search_term
+
+    def _clean_response(self, response: str) -> str:
+        """
+        Clean the response from any tool markup or internal reasoning.
+        Ensures only direct results are shown to the user.
+        """
+        # Remove tool markup
+        tool_pattern = r"<tool>.*?</tool>"
+        response = re.sub(tool_pattern, "", response, flags=re.DOTALL)
+
+        # Remove all possible reasoning indicators
+        reasoning_patterns = [
+            # Thinking about what the user wants
+            r"(?:The user|They|He|She) (?:wants|is asking|is looking for|requested|asked|needs).*?(?:[\.\n]|$)",
+            r"(?:The user|They|He|She) (?:seems to|appears to|might|may|could|would like to).*?(?:[\.\n]|$)",
+            r"This (?:query|question|request) (?:is about|is asking|wants|requires).*?(?:[\.\n]|$)",
+            r"(?:I understand|I see that|I notice|I can tell) (?:the user|you).*?(?:[\.\n]|$)",
+
+            # Planning statements
+            r"(?:I should|I need to|I will|I'll|Let me|I can|I must|I'm going to).*?(?:[\.\n]|$)",
+            r"(?:First|Let|Now|Next|Then|After that|Finally),? (?:I'?ll|I will|let'?s|we'?ll|we will|we can).*?(?:[\.\n]|$)",
+            r"(?:For this|To do this|To answer this|To respond|To handle this),? (?:I'?ll|I will|I need to|I should).*?(?:[\.\n]|$)",
+            r"(?:Let me|I'?ll|I will) (?:check|search|look for|find|analyze|examine|investigate).*?(?:[\.\n]|$)",
+            r"(?:My approach|My strategy|The best way) (?:is|would be|will be).*?(?:[\.\n]|$)",
+
+            # Self-referential statements
+            r"I (?:think|believe|see|notice|observe|know|understand|found|discovered|can see|can tell).*?(?:[\.\n]|$)",
+            r"(?:Since|Because|As|Given that) .*?, (?:I'?ll|I will|I should|I need to|I can).*?(?:[\.\n]|$)",
+            r"(?:Since|Because|As|Given that) .*?, (?:let'?s|we can|we should|we need to).*?(?:[\.\n]|$)",
+            r"(?:Based on|According to|From) .*?, (?:I'?ll|I will|I should|I can).*?(?:[\.\n]|$)",
+
+            # Queries requiring multi-step processing
+            r"To (?:answer|handle|process|respond to|address) this,? (?:I'?ll|I will|I need to|I should).*?(?:[\.\n]|$)",
+            r"This (?:appears|seems) to be (?:a request|an inquiry|a question) about.*?(?:[\.\n]|$)",
+            r"I'll (?:now|first) (?:provide|give|show|present|display) the (?:results|information|data|findings|papers).*?(?:[\.\n]|$)",
+
+            # Paper-specific reasoning patterns
+            r"Since the paper is listed as .*?(?:[\.\n]|$)",
+            r"If (?:the paper|it) is.*?(?:[\.\n]|$)",
+            r"If that fails.*?(?:[\.\n]|$)",
+            r"To (?:summarize|analyze) this paper.*?(?:[\.\n]|$)",
+            r"This appears to be.*?(?:[\.\n]|$)",
+            r"The user is asking about a paper.*?(?:[\.\n]|$)",
+            r"I'll analyze this paper.*?(?:[\.\n]|$)",
+            r"I need to find information about.*?(?:[\.\n]|$)"
+        ]
+
+        for pattern in reasoning_patterns:
+            response = re.sub(pattern, "", response, flags=re.IGNORECASE)
+
+        # Remove introductory phrases
+        intro_phrases = [
+            r"^(?:Based on|According to|From) (?:this|the|your|my).*?,?\s*",
+            r"^(?:Therefore|Thus|Hence|So|In summary|To summarize|To answer your question|To respond to your query|Looking at the|In response),?\s*",
+            r"^(?:Here's|Here are|I found|I've found|I have found|The following|These are|This is) (?:the|some|my|what I|what you|your|our).*?(?:[\.\n]|$)",
+            r"^Let me (?:answer|provide|give you|show you|present|explain).*?(?:[\.\n]|$)",
+            r"^(?:To answer|In response to|Regarding|About|Concerning|On the topic of) your (?:question|query|request).*?(?:[\.\n]|$)",
+            r"^(?:Sure|Okay|Alright|Right|Yes|Of course|Certainly|Absolutely|I'd be happy to|I can).*?(?:[\.\n]|$)"
+        ]
+
+        for phrase in intro_phrases:
+            response = re.sub(phrase, "", response, flags=re.IGNORECASE)
+
+        # Clean up extra whitespace
+        response = re.sub(r'\n\s*\n', '\n\n', response)
+        response = response.strip()
+
+        # If the response is empty after cleaning, provide a fallback
+        if not response.strip():
+            return "I couldn't find specific information about that."
+
+        return response
 
     def analyze_paper(self, paper_id: int) -> Dict:
         """
@@ -487,6 +661,71 @@ class ResearchAssistant:
             return self.agent.analyze_paper(paper["title"], paper["abstract"], paper["full_text"])
         else:
             return self.agent.analyze_paper(paper["title"], paper["abstract"])
+
+    def initiate_paper_chat(self, paper_query: str) -> Dict:
+        """
+        Start a conversation with a specific paper based on query.
+
+        Args:
+            paper_query: Query to identify a paper (title, keywords)
+
+        Returns:
+            Dict with paper chat information
+        """
+        try:
+            # Search for papers matching the query
+            papers = self.search_internal_papers(paper_query)
+
+            if not papers:
+                return {
+                    "action": "response",
+                    "message": f"I couldn't find any papers matching '{paper_query}' in your library. Try uploading the paper first or refine your search."
+                }
+
+            # Use the top result
+            paper = papers[0]
+
+            # Set as active paper chat
+            self.session_memory["active_paper_chat"] = paper
+
+            return {
+                "action": "paper_chat_start",
+                "paper": paper,
+                "message": f"I've started a chat session with '{paper.get('title')}'. You can now ask questions specifically about this paper. Say 'exit chat' when you want to return to the main chat."
+            }
+        except Exception as e:
+            logging.error(f"Error initiating paper chat: {e}")
+            return {
+                "action": "response",
+                "message": f"Sorry, I couldn't start a chat with that paper. Error: {str(e)}"
+            }
+
+    def request_paper_upload(self, request: str = None) -> Dict:
+        """
+        Handle a request to upload a paper.
+
+        Args:
+            request: User's upload request message
+
+        Returns:
+            Dict with upload prompt
+        """
+        # Set pending upload flag
+        self.session_memory["pending_upload"] = True
+
+        return {
+            "action": "upload_prompt",
+            "message": "I'd be happy to help you add a paper to your database. Please upload a PDF file to continue."
+        }
+
+    def check_generation_status(self) -> bool:
+        """
+        Check if a response is currently being generated.
+
+        Returns:
+            Boolean indicating if generation is in progress
+        """
+        return self.is_generating
 
     def chat_with_paper(self, paper_id: int, query: str) -> Dict:
         """
@@ -703,3 +942,308 @@ class ResearchAssistant:
         except Exception as e:
             logging.error(f"Error deleting paper: {e}")
             return {"success": False, "message": str(e)}
+
+    def unified_search(self, query: str, source: str = None) -> List[Dict]:
+        """
+        Perform a unified search across local database and arXiv.
+
+        Args:
+            query: Search query
+            source: Optional source to search (local, arxiv, or None for all)
+
+        Returns:
+            List of papers with their sources
+        """
+        results = []
+
+        # Always search local database first
+        if source in [None, "local"]:
+            local_results = self.search_internal_papers(query)
+            for paper in local_results:
+                paper['search_source'] = 'local'
+                results.append(paper)
+
+        # Search ArXiv if specified or if local search yielded few results
+        if (source in [None, "arxiv"]) or (len(results) < 3):
+            arxiv_results = self.api_service.search_arxiv(query)
+            for paper in arxiv_results:
+                if not self._is_duplicate_paper(paper, results):
+                    paper['search_source'] = 'arxiv'
+                    results.append(paper)
+
+        # Update session memory
+        self.session_memory["search_results"] = results
+        return results
+
+    def _is_duplicate_paper(self, paper: Dict, existing_papers: List[Dict]) -> bool:
+        """Check if a paper is already in the results based on title similarity."""
+        if not paper.get('title'):
+            return False
+
+        title = paper['title'].lower()
+        for existing in existing_papers:
+            if not existing.get('title'):
+                continue
+            existing_title = existing['title'].lower()
+            # Simple string similarity check
+            if (title in existing_title or existing_title in title or
+                    self._string_similarity(title, existing_title) > 0.8):
+                return True
+        return False
+
+    def _string_similarity(self, s1: str, s2: str) -> float:
+        """Calculate string similarity ratio."""
+        from difflib import SequenceMatcher
+        return SequenceMatcher(None, s1, s2).ratio()
+
+    def enhanced_paper_comparison(self, paper1_query: str, paper2_query: str) -> Dict:
+        """
+        Enhanced paper comparison that can fetch papers from any source.
+
+        Args:
+            paper1_query: Query or identifier for first paper
+            paper2_query: Query or identifier for second paper
+
+        Returns:
+            Dict with comparison results and paper info
+        """
+        papers = []
+
+        # Helper function to get a paper
+        def get_paper(query):
+            # Try to find in local database first
+            local_results = self.search_internal_papers(query)
+            if local_results:
+                return local_results[0]
+
+            # Try ArXiv
+            arxiv_results = self.api_service.search_arxiv(query)
+            if arxiv_results:
+                return arxiv_results[0]
+
+            return None
+
+        # Get both papers
+        paper1 = get_paper(paper1_query)
+        paper2 = get_paper(paper2_query)
+
+        if not paper1 or not paper2:
+            return {
+                "success": False,
+                "message": "Could not find one or both papers. Please provide more specific queries."
+            }
+
+        # Generate comparison
+        try:
+            comparison = self.agent.compare_papers(paper1, paper2)
+            return {
+                "success": True,
+                "comparison": comparison,
+                "papers": [paper1, paper2]
+            }
+        except Exception as e:
+            logging.error(f"Error generating comparison: {e}")
+            return {
+                "success": False,
+                "message": f"Error generating comparison: {str(e)}"
+            }
+
+    def _extract_paper_queries(self, query: str) -> List[str]:
+        """Extract paper queries from a comparison request."""
+        # Common comparison phrases
+        patterns = [
+            r"compare\s+(.*?)\s+(?:and|with|to)\s+(.*?)(?:\.|$)",
+            r"difference\s+between\s+(.*?)\s+and\s+(.*?)(?:\.|$)",
+            r"(.*?)\s+(?:vs\.?|versus)\s+(.*?)(?:\.|$)"
+        ]
+
+        for pattern in patterns:
+            matches = re.search(pattern, query, re.IGNORECASE)
+            if matches:
+                return [matches.group(1).strip(), matches.group(2).strip()]
+
+        return []
+
+    def _format_search_results(self, results: List[Dict]) -> str:
+        """Format search results into a readable message."""
+        if not results:
+            return "I couldn't find any papers matching your query. Try refining your search terms."
+
+        message = f"Found {len(results)} relevant papers:\n\n"
+
+        for i, paper in enumerate(results[:5]):
+            title = paper.get('title', 'Unknown Title')
+            authors = paper.get('authors', [])
+
+            # Handle different author formats
+            if isinstance(authors, list):
+                authors_str = ', '.join(authors[:3])
+                if len(authors) > 3:
+                    authors_str += f" and {len(authors) - 3} others"
+            else:
+                authors_str = str(authors) if authors else 'Unknown'
+
+            source = paper.get('search_source', paper.get('source', 'unknown'))
+
+            # Display with 1-based indexing for user friendliness
+            message += f"**{i+1}.** {title}\n"
+            message += f"   **Authors:** {authors_str}\n"
+            message += f"   **Source:** {source.capitalize()}\n"
+
+            # Add abstract preview if available
+            abstract = paper.get('abstract', '')
+            if abstract:
+                # Clean up abstract formatting
+                abstract = abstract.replace('\n', ' ').strip()
+                preview = abstract[:200] + \
+                    "..." if len(abstract) > 200 else abstract
+                message += f"   **Abstract:** {preview}\n"
+
+            # Add ArXiv ID if available
+            if paper.get('arxiv_id'):
+                message += f"   **ArXiv ID:** {paper.get('arxiv_id')}\n"
+
+            # Add paper URL if available
+            if paper.get('url'):
+                message += f"   **Link:** {paper.get('url')}\n"
+
+            message += "\n"
+
+        if len(results) > 5:
+            message += f"... and {len(results) - 5} more papers.\n\n"
+
+        message += "To store any of these papers in your library, say 'store paper X' where X is the paper number."
+
+        return message
+
+    def store_paper_from_search(self, paper_index: str) -> Dict:
+        """
+        Store a paper from search results directly into the database.
+
+        Args:
+            paper_index: Index of paper in search results (1-based for user convenience)
+
+        Returns:
+            Dict with success status and message
+        """
+        try:
+            # Convert to 0-based indexing for internal use
+            paper_idx = int(paper_index) - 1
+
+            if paper_idx < 0 or paper_idx >= len(self.session_memory["search_results"]):
+                return {
+                    "success": False,
+                    "message": f"Invalid paper index. Please choose a number between 1 and {len(self.session_memory['search_results'])}."
+                }
+
+            paper = self.session_memory["search_results"][paper_idx]
+
+            # Check if paper is from arXiv and has a PDF URL
+            if paper.get('source') == 'arxiv' and paper.get('pdf_url'):
+                # Download the PDF
+                import tempfile
+                from datetime import datetime
+
+                # Create filename based on arxiv ID or title
+                arxiv_id = paper.get('arxiv_id', '').replace('/', '_')
+                safe_title = re.sub(
+                    r'[^\w\s-]', '', paper.get('title', 'paper')).strip()
+                safe_title = re.sub(r'[-\s]+', '_', safe_title)[:50]
+
+                timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+                filename = f"{timestamp}_{arxiv_id or safe_title}.pdf"
+
+                # Ensure uploads directory exists
+                uploads_dir = os.path.join(os.path.dirname(
+                    __file__), '..', 'data', 'uploads')
+                os.makedirs(uploads_dir, exist_ok=True)
+
+                file_path = os.path.join(uploads_dir, filename)
+
+                # Download the PDF
+                success = self.api_service.download_paper_pdf(
+                    paper['pdf_url'], file_path)
+
+                if not success:
+                    return {
+                        "success": False,
+                        "message": "Failed to download the PDF from arXiv."
+                    }
+
+                # Extract full text from downloaded PDF
+                full_text = self.pdf_processor.extract_full_text(file_path)
+
+                # Store in database
+                paper_id = self.db.add_paper(
+                    title=paper.get('title', 'Unknown Title'),
+                    abstract=paper.get('abstract', ''),
+                    authors=paper.get('authors', []),
+                    source=f"arxiv_{paper.get('arxiv_id', '')}",
+                    file_path=file_path,
+                    full_text=full_text
+                )
+
+                # Extract documents and add to vector store
+                documents = self.pdf_processor.extract_documents(file_path)
+                for doc in documents:
+                    doc.metadata.update({
+                        "doc_id": paper_id,
+                        "title": paper.get('title', 'Unknown Title'),
+                        "abstract": paper.get('abstract', '')
+                    })
+
+                if documents:
+                    self.vector_store.add_documents(documents)
+
+                # Update session memory
+                self.session_memory["uploaded_papers"].append({
+                    "id": paper_id,
+                    "title": paper.get('title', 'Unknown Title'),
+                    "abstract": paper.get('abstract', ''),
+                    "path": file_path,
+                    "has_full_text": bool(full_text)
+                })
+
+                return {
+                    "success": True,
+                    "message": f"Successfully stored '{paper.get('title')}' in your library!",
+                    "paper_id": paper_id
+                }
+
+            else:
+                # For non-arXiv papers or papers without PDF, store metadata only
+                paper_id = self.db.add_paper(
+                    title=paper.get('title', 'Unknown Title'),
+                    abstract=paper.get('abstract', ''),
+                    authors=paper.get('authors', []),
+                    source=paper.get('source', 'external'),
+                    file_path=None,
+                    full_text=None
+                )
+
+                # Update session memory
+                self.session_memory["uploaded_papers"].append({
+                    "id": paper_id,
+                    "title": paper.get('title', 'Unknown Title'),
+                    "abstract": paper.get('abstract', ''),
+                    "path": None,
+                    "has_full_text": False
+                })
+
+                return {
+                    "success": True,
+                    "message": f"Successfully stored metadata for '{paper.get('title')}' in your library! (PDF not available for download)",
+                    "paper_id": paper_id
+                }
+
+        except ValueError:
+            return {
+                "success": False,
+                "message": "Please provide a valid paper index number."
+            }
+        except Exception as e:
+            logging.error(f"Error storing paper from search: {e}")
+            return {
+                "success": False,
+                "message": f"Failed to store paper: {str(e)}"
+            }
