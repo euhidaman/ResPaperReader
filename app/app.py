@@ -334,12 +334,25 @@ if page == "Chat Assistant":
                 })
 
             elif response["action"] == "comparison_result":
-                st.session_state.chat_history.append({
-                    "role": "assistant",
-                    "content": "Here's the comparison you requested:",
-                    "action": "comparison_result",
-                    "result": response["result"]
-                })
+                # Handle different response structures for comparison results
+                if "result" in response:
+                    # Original comparison structure
+                    st.session_state.chat_history.append({
+                        "role": "assistant",
+                        "content": "Here's the comparison you requested:",
+                        "action": "comparison_result",
+                        "result": response["result"]
+                    })
+                else:
+                    # New comparison structure with direct comparison content
+                    comparison_content = response.get(
+                        "comparison", response.get("message", "Comparison completed"))
+                    st.session_state.chat_history.append({
+                        "role": "assistant",
+                        "content": comparison_content,
+                        "action": "comparison_result",
+                        "result": {"success": True, "comparison": comparison_content}
+                    })
 
             elif response["action"] == "paper_chat_start":
                 st.session_state.chat_history.append({

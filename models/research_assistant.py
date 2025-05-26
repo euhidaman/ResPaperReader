@@ -555,8 +555,13 @@ class ResearchAssistant:
                 complex_comparison_patterns = [
                     r"compare (?:the )?(?:paper )?(?:i uploaded|my (?:uploaded )?paper|my paper) (?:with|to|and) (?:the )?(?:(\w+) paper|paper (\d+))",
                     r"compare (?:the )?(?:(\w+) paper|paper (\d+)) (?:with|to|and) (?:the )?(?:paper )?(?:i uploaded|my (?:uploaded )?paper|my paper)",
-                    r"compare (?:the )?(?:paper )?(?:i uploaded|my (?:uploaded )?paper) (?:with|to|and) (?:the )?(?:(\w+) paper you found|(\d+)(?:st|nd|rd|th)? paper)",
-                    r"compare (?:my|the) (?:uploaded )?paper (?:with|to|and) (?:the )?(?:(\w+) paper|paper (\d+))"
+                    r"compare (?:the )?(?:paper )?(?:i uploaded|my (?:uploaded )?paper|my paper) (?:with|to|and) (?:the )?(?:(\w+) paper you found|(\d+)(?:st|nd|rd|th)? paper)",
+                    r"compare (?:my|the) (?:uploaded )?paper (?:with|to|and) (?:the )?(?:(\w+) paper|paper (\d+))",
+                    # New enhanced patterns for topic-based comparison
+                    r"compare (?:the )?(?:paper )?(?:i uploaded|my (?:uploaded )?paper|my paper) (?:with|to|and) (?:the )?(?:(\w+)(?:st|nd|rd|th)?) paper (?:on|about|regarding|from|you found on) (.+)",
+                    r"compare (?:the )?(?:paper )?(?:i uploaded|my (?:uploaded )?paper|my paper) (?:with|to|and) (?:the )?(?:(\w+)(?:st|nd|rd|th)?) (?:.+ )?(?:on|about|regarding) (.+)",
+                    r"compare (?:my|the) (?:uploaded )?paper (?:with|to|and) (?:the )?(?:(\w+)(?:st|nd|rd|th)?) paper (?:on|about|regarding|from|you found on) (.+)",
+                    r"compare (?:my|the) (?:uploaded )?paper (?:with|to|and) (?:the )?(?:(\w+)(?:st|nd|rd|th)?) (?:.+ )?(?:on|about|regarding) (.+)"
                 ]
 
                 comparison_match = None
@@ -579,19 +584,90 @@ class ResearchAssistant:
                     # Get the referenced paper (either by ordinal number or topic)
                     referenced_paper = None
                     if groups:
-                        ref = groups[0]
-                        if ref.isdigit():
-                            # It's a number - get from search results
-                            idx = int(ref) - 1  # Convert to 0-based index
-                            if 0 <= idx < len(self.session_memory["search_results"]):
-                                referenced_paper = self.session_memory["search_results"][idx]
-                        else:
-                            # It's a topic - search for it
-                            search_results = self.unified_search(ref)
+                        # Check if we have both a number/ordinal and a topic
+                        if len(groups) >= 2:
+                            # Pattern matched both ordinal and topic (e.g., "second paper on diffusion models")
+                            ordinal_or_number = groups[0]
+                            topic = groups[1]
+
+                            # Smart topic correction for common mistakes and similar terms
+                            topic = self._correct_topic_spelling(topic)
+
+                            # Convert ordinal words to numbers
+                            ordinal_map = {
+                                'first': '1', '1st': '1',
+                                'second': '2', '2nd': '2',
+                                'third': '3', '3rd': '3',
+                                'fourth': '4', '4th': '4',
+                                'fifth': '5', '5th': '5'
+                            }
+
+                            paper_number = ordinal_map.get(
+                                ordinal_or_number.lower(), ordinal_or_number)
+
+                            # Search for papers on the topic
+                            search_results = self.search_web_papers(
+                                topic, source="arxiv")
                             if search_results:
-                                referenced_paper = search_results[0]
-                                # Update search results for future reference
-                                self.session_memory["search_results"] = search_results
+                                try:
+                                    # Convert to 0-based index
+                                    paper_idx = int(paper_number) - 1
+                                    if 0 <= paper_idx < len(search_results):
+                                        referenced_paper = search_results[paper_idx]
+                                        # Update search results for future reference
+                                        self.session_memory["search_results"] = search_results
+                                    else:
+                                        return {
+                                            "action": "response",
+                                            "message": f"I found {len(search_results)} papers on '{topic}' but you requested the {ordinal_or_number} paper. Please choose a number between 1 and {len(search_results)}."
+                                        }
+                                except ValueError:
+                                    # If paper_number is not a valid integer, use the first paper
+                                    referenced_paper = search_results[0]
+                                    self.session_memory["search_results"] = search_results
+                            else:
+                                return {
+                                    "action": "response",
+                                    "message": f"I couldn't find any papers on '{topic}' on arXiv. Please try a different topic or check your spelling."
+                                }
+                        else:
+                            # Single group - could be a number from existing results or a topic
+                            ref = groups[0]
+                            if ref.isdigit() or ref in ['first', 'second', 'third', 'fourth', 'fifth', '1st', '2nd', '3rd', '4th', '5th']:
+                                # It's a number or ordinal - get from existing search results
+                                ordinal_map = {
+                                    'first': 1, '1st': 1,
+                                    'second': 2, '2nd': 2,
+                                    'third': 3, '3rd': 3,
+                                    'fourth': 4, '4th': 4,
+                                    'fifth': 5, '5th': 5
+                                }
+
+                                if ref.isdigit():
+                                    idx = int(ref) - 1
+                                else:
+                                    idx = ordinal_map.get(ref.lower(), 1) - 1
+
+                                if 0 <= idx < len(self.session_memory["search_results"]):
+                                    referenced_paper = self.session_memory["search_results"][idx]
+                                else:
+                                    return {
+                                        "action": "response",
+                                        "message": "I don't have recent search results. Please search for papers first, or specify a topic like 'compare my paper with the second paper on diffusion models'."
+                                    }
+                            else:
+                                # It's a topic - search for it and use the first result
+                                search_results = self.search_web_papers(
+                                    ref, source="arxiv")
+                                if search_results:
+                                    referenced_paper = search_results[0]
+                                    # Update search results for future reference
+                                    self.session_memory["search_results"] = search_results
+                                else:
+                                    return {
+                                        "action": "response",
+                                        "message": f"I couldn't find any papers on '{ref}' on arXiv. Please try a different topic."
+                                    }
 
                     if uploaded_paper and referenced_paper:
                         # Perform the comparison
@@ -1920,3 +1996,110 @@ class ResearchAssistant:
                 unique_strategies.append(strategy)
 
         return unique_strategies[:8]  # Limit to 8 strategies
+
+    def _correct_topic_spelling(self, topic: str) -> str:
+        """
+        Correct common spelling mistakes and similar terms in topic queries.
+
+        Args:
+            topic: The original topic string
+
+        Returns:
+            Corrected topic string
+        """
+        topic_lower = topic.lower().strip()
+
+        # Common spelling corrections and similar term mappings
+        corrections = {
+            # Knowledge-related terms
+            "knowledge diffusion": "knowledge distillation",
+            "knowledge transfer": "knowledge distillation",
+            "knowledge sharing": "knowledge distillation",
+            "knowledge extraction": "knowledge distillation",
+
+            # Machine learning terms
+            "machine learning": "machine learning",
+            "deep learning": "deep learning",
+            "neural networks": "neural networks",
+            "artificial intelligence": "artificial intelligence",
+
+            # Computer vision
+            "computer vision": "computer vision",
+            "image recognition": "computer vision",
+            "visual recognition": "computer vision",
+
+            # Natural language processing
+            "natural language processing": "natural language processing",
+            "nlp": "natural language processing",
+            "text processing": "natural language processing",
+
+            # Transformers and attention
+            "transformer": "transformer",
+            "attention mechanism": "attention",
+            "self attention": "self-attention",
+            "multi head attention": "multi-head attention",
+
+            # Model compression
+            "model compression": "model compression",
+            "neural compression": "model compression",
+            "network compression": "model compression",
+
+            # Quantization
+            "quantization": "quantization",
+            "quantisation": "quantization",  # British spelling
+            "model quantization": "quantization",
+
+            # Pruning
+            "pruning": "pruning",
+            "network pruning": "pruning",
+            "model pruning": "pruning",
+
+            # Diffusion models
+            "diffusion models": "diffusion models",
+            "diffusion": "diffusion models",
+            "generative diffusion": "diffusion models",
+
+            # GANs
+            "gan": "generative adversarial networks",
+            "gans": "generative adversarial networks",
+            "generative adversarial": "generative adversarial networks",
+
+            # Reinforcement learning
+            "reinforcement learning": "reinforcement learning",
+            "rl": "reinforcement learning",
+            "deep reinforcement learning": "deep reinforcement learning",
+
+            # Edge computing and TinyML
+            "tinyml": "tinyml",
+            "tiny ml": "tinyml",
+            "edge ml": "edge machine learning",
+            "edge ai": "edge machine learning",
+            "embedded ml": "embedded machine learning",
+            "mobile ml": "mobile machine learning",
+
+            # Federated learning
+            "federated learning": "federated learning",
+            "federated": "federated learning",
+            "distributed learning": "federated learning",
+
+            # Common typos and variations
+            "transfomer": "transformer",  # Common typo
+            "trasformer": "transformer",  # Common typo
+            "knowldge": "knowledge",      # Common typo
+            "distilation": "distillation",  # Common typo
+            "distilation": "distillation",  # Common typo
+        }
+
+        # Check for exact matches first
+        if topic_lower in corrections:
+            return corrections[topic_lower]
+
+        # Check for partial matches (if the topic contains any of the keys)
+        for incorrect, correct in corrections.items():
+            if incorrect in topic_lower:
+                # Replace the incorrect part with the correct one
+                corrected = topic_lower.replace(incorrect, correct)
+                return corrected
+
+        # If no corrections found, return the original topic
+        return topic
