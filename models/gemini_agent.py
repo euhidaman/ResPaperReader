@@ -237,39 +237,124 @@ Format your response as a structured report with clear headings and bullet point
 
     def process_query(self, query, context=None):
         """
-        Process a user query using LangChain.
+        Process a user query using LangChain and provide direct answers.
 
         Args:
             query: User's natural language query
             context: Additional context for the query
 
         Returns:
-            Response from the agent
+            Clean, direct response from the agent
         """
         if not self.llm or not self.api_key:
             return "Gemini API not configured. Please add your API key."
 
-        context_str = ""
+        # Prepare context information
+        context_info = ""
         if context:
-            context_str = f"\nAdditional context:\n{json.dumps(context, indent=2)}"
+            uploaded_papers = context.get("uploaded_papers", [])
+            recent_searches = context.get("recent_searches", [])
+
+            if uploaded_papers:
+                context_info += f"Available papers in library: {', '.join(uploaded_papers[:5])}\n"
+            if recent_searches:
+                context_info += f"Recent search results: {', '.join(recent_searches[:5])}\n"
 
         prompt = ChatPromptTemplate.from_messages([
-            SystemMessage(content=self.get_system_prompt()),
+            SystemMessage(content="""You are a Research Paper Assistant that provides direct, helpful answers about research papers and academic topics.
+
+IMPORTANT INSTRUCTIONS:
+- Provide direct answers without exposing your reasoning process
+- Never say things like "Since the paper is..." or "Based on the information provided..."
+- Never mention checking databases or searching - just provide the answer
+- If you don't have specific information, say so directly
+- For paper summaries, provide the actual summary content
+- Be concise and informative
+- Focus on answering what the user asked, not explaining how you'll do it
+
+Your responses should be clean, professional, and focused on the actual information requested."""),
             HumanMessage(
-                content=f"User query: {query}{context_str}\n\nBased on this query, what action should be taken and what information should be provided?")
+                content=f"""User query: {query}
+
+{context_info}
+
+Provide a direct, helpful answer to this query. Do not explain your reasoning or mention any internal processes.""")
         ])
 
         try:
             chain = prompt | self.llm | self.output_parser
             response = chain.invoke({})
 
+            # Apply thorough cleaning to remove any remaining reasoning patterns
+            cleaned_response = self._clean_response_thoroughly(response)
+
             # Add to conversation history
             self.conversation_history.append({
                 "user": query,
-                "assistant": response
+                "assistant": cleaned_response
             })
 
-            return response
+            return cleaned_response
         except Exception as e:
             logging.error(f"Error processing query: {e}")
             return f"I encountered an error: {str(e)}"
+
+    def _clean_response_thoroughly(self, response):
+        """Thoroughly clean up the response to remove all internal reasoning patterns."""
+        import re
+
+        # Comprehensive list of reasoning patterns to remove
+        reasoning_patterns = [
+            # Direct mentions of reasoning
+            r"(?:Since|Because|As|Given that) (?:the|this) paper (?:is|appears|seems|was|has).*?(?:[\.\n]|$)",
+            r"(?:Based on|According to|From) (?:the|this|what|my) (?:paper|information|context|analysis|understanding).*?(?:[\.\n]|$)",
+            r"(?:The paper|This paper|It) (?:appears|seems|looks like|is likely).*?(?:[\.\n]|$)",
+            r"(?:From|Based on) (?:what|the|my|this) (?:I can see|we know|is provided|information).*?(?:[\.\n]|$)",
+
+            # Process-related statements
+            r"(?:I need to|I should|I will|I'll|Let me) (?:check|search|look|find|analyze|examine).*?(?:[\.\n]|$)",
+            r"(?:I'm going to|I can|I'll|Let me) (?:provide|give|show|present|tell you).*?(?:[\.\n]|$)",
+            r"(?:Let me|I'll) (?:help|assist) (?:you|with|by).*?(?:[\.\n]|$)",
+
+            # Uncertainty indicators that expose reasoning
+            r"(?:It's likely|It seems|It appears|It looks like|If I recall|If memory serves).*?(?:[\.\n]|$)",
+            r"(?:I believe|I think|I suspect|I assume|In my opinion).*?(?:[\.\n]|$)",
+
+            # Database/system references
+            r"(?:in the|from the|checking the) (?:database|library|uploaded_papers|search results).*?(?:[\.\n]|$)",
+            r"(?:Since|Because) (?:it's|they're|the paper is) (?:in the|listed in|stored in).*?(?:[\.\n]|$)",
+
+            # Conditional statements that expose process
+            r"If (?:the paper|it|that) (?:is|exists|can be found).*?(?:[\.\n]|$)",
+            r"If (?:I|we) (?:can|could|find|locate).*?(?:[\.\n]|$)",
+
+            # Tool/method references
+            r"(?:Using|Through|Via) (?:the|my|our) (?:analysis|search|database|tools).*?(?:[\.\n]|$)",
+            r"(?:After|Upon) (?:checking|searching|analyzing|reviewing).*?(?:[\.\n]|$)"
+        ]
+
+        for pattern in reasoning_patterns:
+            response = re.sub(pattern, "", response,
+                              flags=re.IGNORECASE | re.MULTILINE)
+
+        # Remove introductory phrases that indicate process
+        intro_patterns = [
+            r"^(?:Here's what I found|Here's the information|Based on my search|After searching).*?(?:[\:\.\n]|$)",
+            r"^(?:I found that|I can tell you that|I can see that|I discovered that).*?(?:[\:\.\n]|$)",
+            r"^(?:The search reveals|My analysis shows|The results indicate).*?(?:[\:\.\n]|$)",
+            r"^(?:Looking at|Reviewing|Examining|Checking) (?:the|this|your).*?(?:[\:\.\n]|$)"
+        ]
+
+        for pattern in intro_patterns:
+            response = re.sub(pattern, "", response, flags=re.IGNORECASE)
+
+        # Clean up excessive whitespace
+        response = re.sub(r'\n\s*\n\s*\n', '\n\n', response)
+        response = re.sub(r'^\s*\n', '', response)
+        response = response.strip()
+
+        # If response is empty after cleaning, provide a fallback
+        if not response or response.isspace():
+            return "I don't have specific information about that topic."
+
+        return response

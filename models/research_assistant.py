@@ -398,15 +398,31 @@ class ResearchAssistant:
                 r"what is (?:the )?paper ['\"]?([^\"']+)['\"]? about",
                 r"what's (?:the )?paper ['\"]?([^\"']+)['\"]? about",
                 r"(?:tell me|explain) about (?:the )?paper ['\"]?([^\"']+)['\"]",
-                r"(?:summarize|summarise) (?:the )?paper ['\"]?([^\"']+)['\"]"
+                r"(?:summarize|summarise) (?:the )?paper ['\"]?([^\"']+)['\"]",
+                r"(?:can you tell me|tell me) (?:a bit )?more about (?:the )?paper ['\"]?([^\"']+)['\"]",
+                r"(?:what|tell me) (?:about|more about) ['\"]?([^\"']+)['\"]",
+                # Add patterns for general paper questions without specific title
+                r"what is this paper about",
+                r"what's this paper about",
+                r"tell me about this paper",
+                r"what is the paper about",
+                r"what's the paper about",
+                r"summarize this paper",
+                r"what does this paper discuss",
+                r"what is this about"
             ]
 
             # First check if this is a direct question about a specific paper
             paper_title = None
+            is_general_paper_question = False
+
             for pattern in paper_question_patterns:
                 match = re.search(pattern, query_lower)
                 if match:
-                    paper_title = match.group(1)
+                    if match.groups():  # Pattern has a capture group for title
+                        paper_title = match.group(1)
+                    else:  # General paper question without specific title
+                        is_general_paper_question = True
                     break
 
             # If we found a potential paper title, try to find it
@@ -416,11 +432,72 @@ class ResearchAssistant:
                 if papers:
                     # Use the first (most relevant) match
                     paper = papers[0]
-                    # Generate analysis of the paper
+                    # Generate analysis of the paper directly
                     analysis_result = self.analyze_paper(paper["id"])
+                    if analysis_result.get("analysis"):
+                        return {
+                            "action": "response",
+                            "message": analysis_result["analysis"]
+                        }
+                    else:
+                        # Fallback to basic information
+                        response = f"**{paper.get('title', 'Unknown Title')}**\n\n"
+                        if paper.get('abstract'):
+                            response += f"**Abstract:** {paper['abstract']}\n\n"
+                        if paper.get('authors'):
+                            authors = paper['authors']
+                            if isinstance(authors, list):
+                                authors_str = ', '.join(authors)
+                            else:
+                                authors_str = str(authors)
+                            response += f"**Authors:** {authors_str}\n\n"
+
+                        return {
+                            "action": "response",
+                            "message": response if response.strip() != f"**{paper.get('title', 'Unknown Title')}**" else "I found the paper but don't have detailed information about it."
+                        }
+                else:
                     return {
                         "action": "response",
-                        "message": analysis_result.get("analysis", "I couldn't analyze this paper effectively.")
+                        "message": f"I couldn't find a paper titled '{paper_title}' in your library. You might need to upload it first or try a different search term."
+                    }
+
+            # Handle general paper questions (like "what is this paper about")
+            elif is_general_paper_question:
+                # Check if there's a recently uploaded paper
+                if self.session_memory["uploaded_papers"]:
+                    # Use the most recently uploaded paper
+                    recent_paper = self.session_memory["uploaded_papers"][-1]
+                    analysis_result = self.analyze_paper(recent_paper["id"])
+                    if analysis_result.get("analysis"):
+                        return {
+                            "action": "response",
+                            "message": analysis_result["analysis"]
+                        }
+                    else:
+                        # Fallback to basic information about the recent paper
+                        response = f"**{recent_paper.get('title', 'Unknown Title')}**\n\n"
+                        if recent_paper.get('abstract'):
+                            response += f"**Abstract:** {recent_paper['abstract']}\n\n"
+
+                        # Get full paper details from DB if needed
+                        full_paper = self.db.get_paper(recent_paper["id"])
+                        if full_paper and full_paper.get('authors'):
+                            authors = full_paper['authors']
+                            if isinstance(authors, list):
+                                authors_str = ', '.join(authors)
+                            else:
+                                authors_str = str(authors)
+                            response += f"**Authors:** {authors_str}\n\n"
+
+                        return {
+                            "action": "response",
+                            "message": response if response.strip() != f"**{recent_paper.get('title', 'Unknown Title')}**" else "I found the paper but don't have detailed information about it."
+                        }
+                else:
+                    return {
+                        "action": "response",
+                        "message": "I don't see any papers in your library yet. Please upload a paper first, and then I can tell you about it."
                     }
 
             is_search_query = any(
@@ -462,6 +539,74 @@ class ResearchAssistant:
 
             # Handle paper comparison requests
             if any(phrase in query.lower() for phrase in ["compare", "difference between", "versus", "vs"]):
+                # Check for complex comparison patterns
+                complex_comparison_patterns = [
+                    r"compare (?:the )?(?:paper )?(?:i uploaded|my (?:uploaded )?paper|my paper) (?:with|to|and) (?:the )?(?:(\w+) paper|paper (\d+))",
+                    r"compare (?:the )?(?:(\w+) paper|paper (\d+)) (?:with|to|and) (?:the )?(?:paper )?(?:i uploaded|my (?:uploaded )?paper|my paper)",
+                    r"compare (?:the )?(?:paper )?(?:i uploaded|my (?:uploaded )?paper) (?:with|to|and) (?:the )?(?:(\w+) paper you found|(\d+)(?:st|nd|rd|th)? paper)",
+                    r"compare (?:my|the) (?:uploaded )?paper (?:with|to|and) (?:the )?(?:(\w+) paper|paper (\d+))"
+                ]
+
+                comparison_match = None
+                for pattern in complex_comparison_patterns:
+                    match = re.search(pattern, query.lower())
+                    if match:
+                        comparison_match = match
+                        break
+
+                if comparison_match:
+                    # Extract paper references
+                    groups = [g for g in comparison_match.groups()
+                              if g is not None]
+
+                    # Get the most recent uploaded paper
+                    uploaded_paper = None
+                    if self.session_memory["uploaded_papers"]:
+                        uploaded_paper = self.session_memory["uploaded_papers"][-1]
+
+                    # Get the referenced paper (either by ordinal number or topic)
+                    referenced_paper = None
+                    if groups:
+                        ref = groups[0]
+                        if ref.isdigit():
+                            # It's a number - get from search results
+                            idx = int(ref) - 1  # Convert to 0-based index
+                            if 0 <= idx < len(self.session_memory["search_results"]):
+                                referenced_paper = self.session_memory["search_results"][idx]
+                        else:
+                            # It's a topic - search for it
+                            search_results = self.unified_search(ref)
+                            if search_results:
+                                referenced_paper = search_results[0]
+                                # Update search results for future reference
+                                self.session_memory["search_results"] = search_results
+
+                    if uploaded_paper and referenced_paper:
+                        # Perform the comparison
+                        comparison = self.agent.compare_papers(
+                            self.db.get_paper(
+                                uploaded_paper["id"]) or uploaded_paper,
+                            referenced_paper
+                        )
+
+                        return {
+                            "action": "comparison_result",
+                            "comparison": comparison,
+                            "papers": [uploaded_paper, referenced_paper],
+                            "message": comparison
+                        }
+                    elif not uploaded_paper:
+                        return {
+                            "action": "response",
+                            "message": "I don't see any uploaded papers in your library. Please upload a paper first before comparing."
+                        }
+                    else:
+                        return {
+                            "action": "response",
+                            "message": f"I couldn't find the referenced paper. If you meant a specific paper from search results, please make sure you've searched for papers first."
+                        }
+
+                # Fall back to original comparison logic
                 papers = self._extract_paper_queries(query)
                 if papers:
                     result = self.enhanced_paper_comparison(
@@ -595,25 +740,41 @@ class ResearchAssistant:
             }
 
     def _extract_search_term(self, query: str, search_keywords: list) -> str:
-        """Extract the search term from a query."""
+        """Extract the search term from a query with improved logic."""
         query_lower = query.lower()
         search_term = query
 
+        # Find the search keyword and extract what comes after it
         for keyword in search_keywords:
             if keyword in query_lower:
                 parts = query_lower.split(keyword, 1)
                 if len(parts) > 1:
                     search_term = parts[1].strip()
-                    # Remove common words
+
+                    # Only remove very common filler words, preserve technical terms
+                    # Be more selective about what to remove
                     search_term = re.sub(
-                        r'\b(paper|the|a|an|for|me|of)\b', '', search_term).strip()
-                    # Remove quotes
+                        r'\b(the|a|an|for|me|about)\b', '', search_term).strip()
+
+                    # Remove "papers" or "research" only if they're at the end
+                    search_term = re.sub(
+                        r'\b(papers?|research|articles?|studies)\s*$', '', search_term).strip()
+
+                    # Remove quotes if present
                     if (search_term.startswith("'") and search_term.endswith("'")) or \
                        (search_term.startswith('"') and search_term.endswith('"')):
                         search_term = search_term[1:-1]
+
                     break
 
-        return search_term
+        # If we extracted something meaningful, use it; otherwise use original query
+        if search_term and len(search_term.strip()) > 2:
+            return search_term.strip()
+        else:
+            # Fall back to original query with minimal cleaning
+            cleaned = re.sub(r'\b(find|search|look for|get me|show me)\b',
+                             '', query, flags=re.IGNORECASE).strip()
+            return cleaned if cleaned else query
 
     def _clean_response(self, response: str) -> str:
         """
