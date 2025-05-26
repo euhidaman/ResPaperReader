@@ -531,16 +531,61 @@ class ResearchAssistant:
                 "recent_searches": [p.get("title") for p in self.session_memory["search_results"]]
             }
 
-            # Use the Gemini agent directly for a clean response
-            response = self.agent.process_query(query, context)
+            # Check if query is related to research papers, science, or the project
+            if self._is_relevant_query(query):
+                # Handle specific database queries
+                if any(phrase in query_lower for phrase in ["papers in database", "papers in library", "what papers", "list papers", "show papers"]):
+                    papers = self.db.get_all_papers(limit=20)
+                    if not papers:
+                        return {
+                            "action": "response",
+                            "message": "Your library is currently empty. You can upload papers or search for papers online to add them to your library."
+                        }
 
-            # Clean the response from any tool markup
-            cleaned_response = self._clean_response(response)
+                    response = f"You have {len(papers)} papers in your library:\n\n"
+                    for i, paper in enumerate(papers[:10], 1):
+                        title = paper.get('title', 'Unknown Title')
+                        authors = paper.get('authors', [])
+                        if isinstance(authors, list):
+                            authors_str = ', '.join(authors[:2])
+                            if len(authors) > 2:
+                                authors_str += f" and {len(authors) - 2} others"
+                        else:
+                            authors_str = str(
+                                authors) if authors else 'Unknown'
 
-            return {
-                "action": "response",
-                "message": cleaned_response
-            }
+                        response += f"**{i}.** {title}\n"
+                        response += f"   **Authors:** {authors_str}\n"
+                        if paper.get('abstract'):
+                            abstract_preview = paper['abstract'][:150] + "..." if len(
+                                paper['abstract']) > 150 else paper['abstract']
+                            response += f"   **Abstract:** {abstract_preview}\n"
+                        response += "\n"
+
+                    if len(papers) > 10:
+                        response += f"... and {len(papers) - 10} more papers."
+
+                    return {
+                        "action": "response",
+                        "message": response
+                    }
+
+                # Use the Gemini agent for other research-related queries
+                response = self.agent.process_query(query, context)
+
+                # Clean the response from any tool markup and reasoning
+                cleaned_response = self._clean_response(response)
+
+                return {
+                    "action": "response",
+                    "message": cleaned_response
+                }
+            else:
+                # Handle out-of-context queries
+                return {
+                    "action": "response",
+                    "message": "I'm a research paper assistant focused on helping with academic papers, research, and scientific literature. I can help you upload papers, search for research, analyze papers, and compare studies. Please ask me something related to research papers or academic work."
+                }
 
         except Exception as e:
             logging.error(f"Error processing query: {e}")
@@ -1247,3 +1292,63 @@ class ResearchAssistant:
                 "success": False,
                 "message": f"Failed to store paper: {str(e)}"
             }
+
+    def _is_relevant_query(self, query: str) -> bool:
+        """
+        Check if a query is relevant to research papers, science, or the project.
+
+        Args:
+            query: User's query
+
+        Returns:
+            Boolean indicating if the query is relevant
+        """
+        query_lower = query.lower()
+
+        # Research and academic keywords
+        research_keywords = [
+            "paper", "research", "study", "article", "publication", "journal",
+            "conference", "arxiv", "academic", "scholar", "citation", "thesis",
+            "dissertation", "manuscript", "preprint", "peer review"
+        ]
+
+        # Science and technology keywords
+        science_keywords = [
+            "science", "scientific", "experiment", "analysis", "method", "methodology",
+            "data", "results", "findings", "hypothesis", "theory", "model",
+            "algorithm", "machine learning", "ai", "artificial intelligence",
+            "deep learning", "neural network", "computer science", "engineering",
+            "mathematics", "physics", "chemistry", "biology", "medicine"
+        ]
+
+        # Project-specific keywords
+        project_keywords = [
+            "database", "library", "upload", "search", "compare", "analysis",
+            "pdf", "document", "abstract", "title", "author", "citation"
+        ]
+
+        # Check if query contains any relevant keywords
+        all_keywords = research_keywords + science_keywords + project_keywords
+
+        # Check for direct matches
+        for keyword in all_keywords:
+            if keyword in query_lower:
+                return True
+
+        # Check for question patterns that might be research-related
+        research_patterns = [
+            r"what.*(?:paper|research|study)",
+            r"how.*(?:work|method|approach)",
+            r"find.*(?:paper|research|article)",
+            r"compare.*(?:paper|study|method)",
+            r"analyze.*(?:data|paper|research)",
+            r"explain.*(?:method|approach|algorithm)",
+            r"summarize.*(?:paper|research|study)"
+        ]
+
+        for pattern in research_patterns:
+            if re.search(pattern, query_lower):
+                return True
+
+        # If none of the above match, it's likely not relevant
+        return False
