@@ -1276,15 +1276,47 @@ class ResearchAssistant:
         """
         papers = []
 
-        # Helper function to get a paper
+        # Helper function to get a paper with improved search
         def get_paper(query):
-            # Try to find in local database first
-            local_results = self.search_internal_papers(query)
-            if local_results:
-                return local_results[0]
+            # Try multiple search strategies for better paper matching
 
-            # Try ArXiv
-            arxiv_results = self.api_service.search_arxiv(query)
+            # Strategy 1: Try fuzzy title matching with lower threshold
+            fuzzy_results = self.db.find_paper_by_title_fuzzy(
+                query, threshold=0.4)
+            if fuzzy_results:
+                return fuzzy_results[0]
+
+            # Strategy 2: Try direct database search for exact title matches
+            all_papers = self.db.get_all_papers()
+            query_lower = query.lower().strip()
+
+            # Check for exact title matches (case insensitive)
+            for paper in all_papers:
+                if paper.get('title'):
+                    title_lower = paper['title'].lower().strip()
+                    if title_lower == query_lower:
+                        return paper
+
+            # Strategy 3: Check for substring matches in titles
+            for paper in all_papers:
+                if paper.get('title'):
+                    title_lower = paper['title'].lower().strip()
+                    # Check if query is contained in title or vice versa
+                    if query_lower in title_lower or title_lower in query_lower:
+                        # Calculate similarity to ensure it's a good match
+                        from difflib import SequenceMatcher
+                        similarity = SequenceMatcher(
+                            None, query_lower, title_lower).ratio()
+                        if similarity > 0.3:  # Lower threshold for partial matches
+                            return paper
+
+            # Strategy 4: Try semantic search in internal papers
+            semantic_results = self.search_internal_papers(query)
+            if semantic_results:
+                return semantic_results[0]
+
+            # Strategy 5: Try ArXiv as fallback
+            arxiv_results = self.api_service.search_arxiv(query, max_results=3)
             if arxiv_results:
                 return arxiv_results[0]
 
@@ -1294,10 +1326,16 @@ class ResearchAssistant:
         paper1 = get_paper(paper1_query)
         paper2 = get_paper(paper2_query)
 
-        if not paper1 or not paper2:
+        if not paper1:
             return {
                 "success": False,
-                "message": "Could not find one or both papers. Please provide more specific queries."
+                "message": f"Could not find the first paper: '{paper1_query}'. Please check the title or try uploading it first."
+            }
+
+        if not paper2:
+            return {
+                "success": False,
+                "message": f"Could not find the second paper: '{paper2_query}'. Please check the title or try uploading it first."
             }
 
         # Generate comparison
