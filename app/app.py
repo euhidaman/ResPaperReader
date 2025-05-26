@@ -236,12 +236,16 @@ if page == "Chat Assistant":
             content = message["content"]
 
             if role == "user":
-                st.markdown(f"**You:** {content}")
+                st.markdown(
+                    f'<p style="font-size: 19px;"><span style="background-color: #0066cc; color: white; padding: 4px 8px; border-radius: 4px; font-weight: bold; margin-right: 8px;">USER</span> <strong>You:</strong> {content}</p>',
+                    unsafe_allow_html=True)
             else:
                 # Handle different types of assistant responses
                 if message.get("type") == "paper_chat":
                     with st.container():
-                        st.markdown(f"**Assistant (Paper Chat):** {content}")
+                        st.markdown(
+                            f'<p style="font-size: 19px;"><span style="background-color: #ff6600; color: white; padding: 4px 8px; border-radius: 4px; font-weight: bold; margin-right: 8px;">AI</span> <strong>Assistant (Paper Chat):</strong> {content}</p>',
+                            unsafe_allow_html=True)
                         if "sources" in message:
                             with st.expander("View sources from paper"):
                                 for source in message["sources"]:
@@ -251,7 +255,9 @@ if page == "Chat Assistant":
                                             f"*Page {source['metadata'].get('page', 'unknown')}*")
 
                 elif message.get("action") == "search_results":
-                    st.markdown(f"**Assistant:** {content}")
+                    st.markdown(
+                        f'<p style="font-size: 19px;"><span style="background-color: #ff6600; color: white; padding: 4px 8px; border-radius: 4px; font-weight: bold; margin-right: 8px;">AI</span> <strong>Assistant:</strong> {content}</p>',
+                        unsafe_allow_html=True)
                     if message.get("results"):
                         with st.expander("View search results"):
                             for i, paper in enumerate(message["results"], 1):
@@ -264,7 +270,9 @@ if page == "Chat Assistant":
                                 st.markdown("---")
 
                 elif message.get("action") == "comparison_result":
-                    st.markdown(f"**Assistant:** {content}")
+                    st.markdown(
+                        f'<p style="font-size: 19px;"><span style="background-color: #ff6600; color: white; padding: 4px 8px; border-radius: 4px; font-weight: bold; margin-right: 8px;">AI</span> <strong>Assistant:</strong> {content}</p>',
+                        unsafe_allow_html=True)
                     result = message.get("result", {})
                     if result.get("success"):
                         with st.expander("View detailed comparison"):
@@ -274,7 +282,9 @@ if page == "Chat Assistant":
                             "message", "Failed to generate comparison"))
 
                 else:
-                    st.markdown(f"**Assistant:** {content}")
+                    st.markdown(
+                        f'<p style="font-size: 19px;"><span style="background-color: #ff6600; color: white; padding: 4px 8px; border-radius: 4px; font-weight: bold; margin-right: 8px;">AI</span> <strong>Assistant:</strong> {content}</p>',
+                        unsafe_allow_html=True)
 
     # Show loading indicator while generating
     if st.session_state.is_generating:
@@ -582,10 +592,14 @@ elif page == "Chat with Papers":
                 content = message["content"]
 
                 if role == "user":
-                    st.markdown(f"**You:** {content}")
+                    st.markdown(
+                        f'<p style="font-size: 19px;"><span style="background-color: #0066cc; color: white; padding: 4px 8px; border-radius: 4px; font-weight: bold; margin-right: 8px;">USER</span> <strong>You:</strong> {content}</p>',
+                        unsafe_allow_html=True)
                 else:
                     with st.container():
-                        st.markdown(f"**Assistant:** {content}")
+                        st.markdown(
+                            f'<p style="font-size: 19px;"><span style="background-color: #ff6600; color: white; padding: 4px 8px; border-radius: 4px; font-weight: bold; margin-right: 8px;">AI</span> <strong>Assistant:</strong> {content}</p>',
+                            unsafe_allow_html=True)
                         # If the message has sources, display them in an expander
                         if "sources" in message:
                             with st.expander("View sources from paper"):
