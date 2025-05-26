@@ -117,9 +117,9 @@ class ResearchAssistant:
                 MessagesPlaceholder(variable_name="agent_scratchpad")
             ])
 
-            # Create agent with verbose=False
+            # Create agent without verbose parameter (removed deprecated parameter)
             agent = create_react_agent(
-                self.llm, self.tools, prompt, verbose=False)
+                self.llm, self.tools, prompt)
 
             # Create agent executor with all verbose settings disabled
             self.agent_executor = AgentExecutor(
@@ -223,7 +223,7 @@ class ResearchAssistant:
 
     def search_internal_papers(self, query: str) -> List[Dict]:
         """
-        Search for papers in the internal database using LangChain.
+        Search for papers in the internal database using LangChain and improved fuzzy matching.
 
         Args:
             query: Search query
@@ -231,26 +231,38 @@ class ResearchAssistant:
         Returns:
             List of matching papers
         """
-        # Try semantic search first
+        # First try fuzzy title matching for better exact paper finding
+        fuzzy_results = self.db.find_paper_by_title_fuzzy(query, threshold=0.6)
+
+        if fuzzy_results:
+            # Update session memory and return fuzzy results
+            self.session_memory["search_results"] = fuzzy_results
+            return fuzzy_results
+
+        # Try semantic search next
         semantic_results = self.vector_store.search(query, k=5)
 
-        # If no semantic results, fall back to keyword search
-        if not semantic_results:
-            keyword_results = self.db.search_papers(query)
-            return keyword_results
+        # If semantic results found, get full paper details
+        if semantic_results:
+            results = []
+            for item in semantic_results:
+                if item.get('doc_id'):
+                    paper = self.db.get_paper(item['doc_id'])
+                    if paper:
+                        paper['score'] = item.get('score', 0)
+                        results.append(paper)
 
-        # Get full paper details from DB for each semantic result
-        results = []
-        for item in semantic_results:
-            if item.get('doc_id'):
-                paper = self.db.get_paper(item['doc_id'])
-                if paper:
-                    paper['score'] = item.get('score', 0)
-                    results.append(paper)
+            if results:
+                # Update session memory
+                self.session_memory["search_results"] = results
+                return results
+
+        # Fall back to keyword search with case-insensitive matching
+        keyword_results = self.db.search_papers(query)
 
         # Update session memory
-        self.session_memory["search_results"] = results
-        return results
+        self.session_memory["search_results"] = keyword_results
+        return keyword_results
 
     def search_web_papers(self, query: str, source: str = None) -> List[Dict]:
         """
@@ -263,7 +275,7 @@ class ResearchAssistant:
         Returns:
             List of matching papers
         """
-        results = self.api_service.search_arxiv(query)
+        results = self.api_service.search_arxiv(query, max_results=5)
 
         # Update session memory
         self.session_memory["search_results"] = results
@@ -679,12 +691,12 @@ class ResearchAssistant:
             # Check if query is related to research papers, science, or the project
             if self._is_relevant_query(query):
                 # Handle specific database queries
-                if any(phrase in query_lower for phrase in ["papers in database", "papers in library", "what papers", "list papers", "show papers"]):
+                if any(phrase in query_lower for phrase in ["papers in database", "papers in library", "what papers", "list papers", "show papers", "papers in your database", "papers in your library"]):
                     papers = self.db.get_all_papers(limit=20)
                     if not papers:
                         return {
                             "action": "response",
-                            "message": "Your library is currently empty. You can upload papers or search for papers online to add them to your library."
+                            "message": "Your database is currently empty. You can upload papers using the 'Upload Papers' section or search for papers online and store them in your library."
                         }
 
                     response = f"You have {len(papers)} papers in your library:\n\n"
@@ -751,14 +763,38 @@ class ResearchAssistant:
                 if len(parts) > 1:
                     search_term = parts[1].strip()
 
-                    # Only remove very common filler words, preserve technical terms
-                    # Be more selective about what to remove
-                    search_term = re.sub(
-                        r'\b(the|a|an|for|me|about)\b', '', search_term).strip()
+                    # Check if this looks like a conference query (preserve conference names and years)
+                    conference_patterns = [
+                        r'\b(acl|emnlp|naacl|eacl|coling|conll|neurips|nips|icml|iclr|cvpr|iccv|eccv|aaai|ijcai|aamas|icse|fse|sigmod|vldb|icde|ccs|usenix|ndss|stoc|focs|soda|siggraph|icra|iros|rss)\b',
+                        r'\b\d{4}\b',  # Years
+                        r'conference|workshop|symposium|proceedings'
+                    ]
 
-                    # Remove "papers" or "research" only if they're at the end
-                    search_term = re.sub(
-                        r'\b(papers?|research|articles?|studies)\s*$', '', search_term).strip()
+                    # Check if this is a technical term query (preserve technical terms)
+                    technical_patterns = [
+                        r'\b(tinyml|federated learning|transformer|bert|gpt|lstm|cnn|neural|machine learning|deep learning|nlp|computer vision|robotics|ai|artificial intelligence)\b',
+                        # Mixed case acronyms like TinyML
+                        r'\b[A-Z]{2,}[a-z]*\b',
+                        r'\b[A-Z]+\b'  # All caps acronyms
+                    ]
+
+                    is_conference_query = any(re.search(
+                        pattern, search_term, re.IGNORECASE) for pattern in conference_patterns)
+                    is_technical_query = any(re.search(
+                        pattern, search_term, re.IGNORECASE) for pattern in technical_patterns)
+
+                    if is_conference_query or is_technical_query:
+                        # For conference/technical queries, only remove very basic words
+                        search_term = re.sub(
+                            r'\b(the|a|an|for|me|about|from)\b', '', search_term, flags=re.IGNORECASE).strip()
+                    else:
+                        # For regular queries, be more selective about what to remove
+                        search_term = re.sub(
+                            r'\b(the|a|an|for|me|about)\b', '', search_term, flags=re.IGNORECASE).strip()
+
+                        # Remove "papers" or "research" only if they're at the end
+                        search_term = re.sub(
+                            r'\b(papers?|research|articles?|studies)\s*$', '', search_term, flags=re.IGNORECASE).strip()
 
                     # Remove quotes if present
                     if (search_term.startswith("'") and search_term.endswith("'")) or \
@@ -1151,27 +1187,52 @@ class ResearchAssistant:
 
     def unified_search(self, query: str, source: str = None) -> List[Dict]:
         """
-        Perform a unified search across local database and arXiv.
+        Perform a unified search with proper priority: local database first, then arXiv if needed.
 
         Args:
             query: Search query
-            source: Optional source to search (local, arxiv, or None for all)
+            source: Optional source to search (local, arxiv, or None for intelligent search)
 
         Returns:
             List of papers with their sources
         """
         results = []
 
-        # Always search local database first
-        if source in [None, "local"]:
+        # Step 1: Always search local database first (unless specifically requesting arXiv only)
+        if source != "arxiv":
             local_results = self.search_internal_papers(query)
             for paper in local_results:
-                paper['search_source'] = 'local'
+                paper['search_source'] = 'local_database'
                 results.append(paper)
 
-        # Search ArXiv if specified or if local search yielded few results
-        if (source in [None, "arxiv"]) or (len(results) < 3):
-            arxiv_results = self.api_service.search_arxiv(query)
+            # If we found relevant papers locally, check if they're sufficient
+            if local_results:
+                print(f"Found {len(local_results)} papers in local database")
+
+                # If we have good local results, return them
+                if len(local_results) >= 3:  # Sufficient local results
+                    self.session_memory["search_results"] = results
+                    return results
+
+                # If we have some but not many local results, we'll supplement with arXiv below
+
+        # Step 2: Search arXiv only if:
+        # - No local results found, OR
+        # - Explicitly requested arXiv, OR
+        # - Local results are insufficient (< 3 papers)
+        should_search_arxiv = (
+            len(results) == 0 or  # No local results
+            source == "arxiv" or  # Explicitly requested
+            (source is None and len(results) < 3)  # Insufficient local results
+        )
+
+        if should_search_arxiv:
+            print(
+                f"Searching arXiv because: local_results={len(results)}, source={source}")
+            arxiv_results = self.api_service.search_arxiv(
+                query, max_results=10)
+
+            # Add arXiv results, avoiding duplicates
             for paper in arxiv_results:
                 if not self._is_duplicate_paper(paper, results):
                     paper['search_source'] = 'arxiv'
@@ -1271,54 +1332,110 @@ class ResearchAssistant:
         return []
 
     def _format_search_results(self, results: List[Dict]) -> str:
-        """Format search results into a readable message."""
+        """Format search results into a readable message with clear source indication."""
         if not results:
-            return "I couldn't find any papers matching your query. Try refining your search terms."
+            return "No papers found in your local library. Searching arXiv for relevant papers...\n\n" + \
+                   "No relevant papers found on arXiv either. Try different search terms."
 
-        message = f"Found {len(results)} relevant papers:\n\n"
+        # Separate local and external results
+        local_results = [p for p in results if p.get(
+            'search_source') == 'local_database']
+        external_results = [p for p in results if p.get(
+            'search_source') != 'local_database']
 
-        for i, paper in enumerate(results[:5]):
-            title = paper.get('title', 'Unknown Title')
-            authors = paper.get('authors', [])
+        message = ""
 
-            # Handle different author formats
-            if isinstance(authors, list):
-                authors_str = ', '.join(authors[:3])
-                if len(authors) > 3:
-                    authors_str += f" and {len(authors) - 3} others"
+        # Handle local results first
+        if local_results:
+            message += f"📚 **Found {len(local_results)} papers in your local library:**\n\n"
+
+            for i, paper in enumerate(local_results[:10]):
+                title = paper.get('title', 'Unknown Title')
+                authors = paper.get('authors', [])
+
+                # Handle different author formats
+                if isinstance(authors, list):
+                    authors_str = ', '.join(authors[:3])
+                    if len(authors) > 3:
+                        authors_str += f" and {len(authors) - 3} others"
+                else:
+                    authors_str = str(authors) if authors else 'Unknown'
+
+                # Display with 1-based indexing for user friendliness
+                message += f"**{i+1}.** {title}\n"
+                message += f"   **Authors:** {authors_str}\n"
+                message += f"   **Source:** Local Library\n"
+
+                # Add abstract preview if available
+                abstract = paper.get('abstract', '')
+                if abstract:
+                    abstract = abstract.replace('\n', ' ').strip()
+                    preview = abstract[:200] + \
+                        "..." if len(abstract) > 200 else abstract
+                    message += f"   **Abstract:** {preview}\n"
+
+                message += "\n"
+
+            if len(local_results) > 10:
+                message += f"... and {len(local_results) - 10} more papers in your library.\n\n"
             else:
-                authors_str = str(authors) if authors else 'Unknown'
+                message += "\n"
 
-            source = paper.get('search_source', paper.get('source', 'unknown'))
+        # Handle external results
+        if external_results:
+            if local_results:
+                if len(local_results) < 3:
+                    message += f"🌐 **Also found {len(external_results)} additional papers from arXiv:**\n\n"
+                else:
+                    message += f"🌐 **Additional papers from arXiv (since you asked for more):**\n\n"
+            else:
+                message += f"🌐 **No papers found in local library. Found {len(external_results)} papers from arXiv:**\n\n"
 
-            # Display with 1-based indexing for user friendliness
-            message += f"**{i+1}.** {title}\n"
-            message += f"   **Authors:** {authors_str}\n"
-            message += f"   **Source:** {source.capitalize()}\n"
+            # Continue numbering from where local results left off
+            start_index = len(local_results)
 
-            # Add abstract preview if available
-            abstract = paper.get('abstract', '')
-            if abstract:
-                # Clean up abstract formatting
-                abstract = abstract.replace('\n', ' ').strip()
-                preview = abstract[:200] + \
-                    "..." if len(abstract) > 200 else abstract
-                message += f"   **Abstract:** {preview}\n"
+            for i, paper in enumerate(external_results[:10], start=start_index + 1):
+                title = paper.get('title', 'Unknown Title')
+                authors = paper.get('authors', [])
 
-            # Add ArXiv ID if available
-            if paper.get('arxiv_id'):
-                message += f"   **ArXiv ID:** {paper.get('arxiv_id')}\n"
+                if isinstance(authors, list):
+                    authors_str = ', '.join(authors[:3])
+                    if len(authors) > 3:
+                        authors_str += f" and {len(authors) - 3} others"
+                else:
+                    authors_str = str(authors) if authors else 'Unknown'
 
-            # Add paper URL if available
-            if paper.get('url'):
-                message += f"   **Link:** {paper.get('url')}\n"
+                source = paper.get(
+                    'search_source', paper.get('source', 'external'))
 
-            message += "\n"
+                message += f"**{i}.** {title}\n"
+                message += f"   **Authors:** {authors_str}\n"
+                message += f"   **Source:** {source.capitalize()}\n"
 
-        if len(results) > 5:
-            message += f"... and {len(results) - 5} more papers.\n\n"
+                # Add abstract preview if available
+                abstract = paper.get('abstract', '')
+                if abstract:
+                    abstract = abstract.replace('\n', ' ').strip()
+                    preview = abstract[:200] + \
+                        "..." if len(abstract) > 200 else abstract
+                    message += f"   **Abstract:** {preview}\n"
 
-        message += "To store any of these papers in your library, say 'store paper X' where X is the paper number."
+                # Add ArXiv ID if available
+                if paper.get('arxiv_id'):
+                    message += f"   **ArXiv ID:** {paper.get('arxiv_id')}\n"
+
+                # Add paper URL if available
+                if paper.get('url'):
+                    message += f"   **Link:** {paper.get('url')}\n"
+
+                message += "\n"
+
+            if len(external_results) > 10:
+                message += f"... and {len(external_results) - 10} more papers from external sources.\n\n"
+
+        # Add action message
+        if external_results:
+            message += "💾 **To store any external papers in your library, say 'store paper X' where X is the paper number.**"
 
         return message
 
@@ -1513,3 +1630,255 @@ class ResearchAssistant:
 
         # If none of the above match, it's likely not relevant
         return False
+
+    def search_by_topic(self, topic: str, limit: int = 10) -> List[Dict]:
+        """Search papers by topic with improved strategies."""
+        try:
+            print(f"Searching for topic: {topic}")
+
+            # Enhanced search strategies for technical terms
+            search_strategies = [
+                topic,  # Exact term
+                topic.lower(),  # Lowercase
+                topic.upper(),  # Uppercase for acronyms
+                # Remove spaces (e.g., "Tiny ML" -> "TinyML")
+                topic.replace(" ", ""),
+                topic.replace("ml", "machine learning"),  # Expand ML
+                topic.replace("ai", "artificial intelligence"),  # Expand AI
+                topic.replace("dl", "deep learning"),  # Expand DL
+                f"{topic} learning",  # Add "learning" for ML terms
+                f"{topic} systems",  # Add "systems" for technical terms
+                f"{topic} models",  # Add "models"
+                f"{topic} algorithms",  # Add "algorithms"
+            ]
+
+            # For TinyML specifically, add domain-specific variations
+            if "tinyml" in topic.lower():
+                search_strategies.extend([
+                    "tiny machine learning",
+                    "embedded machine learning",
+                    "edge machine learning",
+                    "mobile machine learning",
+                    "iot machine learning",
+                    "microcontroller machine learning",
+                    "resource constrained machine learning",
+                    "edge ai",
+                    "embedded ai",
+                    "on-device machine learning",
+                    "efficient neural networks",
+                    "model compression",
+                    "neural network quantization"
+                ])
+
+            # Remove duplicates while preserving order
+            search_strategies = list(dict.fromkeys(search_strategies))
+
+            all_results = []
+            seen_ids = set()
+
+            for strategy in search_strategies:
+                print(f"Trying search strategy: {strategy}")
+
+                # Try vector search first
+                try:
+                    vector_results = self.vector_store.search(
+                        strategy, k=limit*2)
+                    print(
+                        f"Vector search returned {len(vector_results)} results")
+
+                    for result in vector_results:
+                        paper_id = result.get('doc_id')
+                        if paper_id and paper_id not in seen_ids:
+                            # Get full paper details from database
+                            paper = self.db.get_paper(paper_id)
+                            if paper:
+                                # Enhanced relevance scoring
+                                relevance_score = self._calculate_topic_relevance(
+                                    paper, topic)
+                                paper['relevance_score'] = relevance_score
+
+                                if relevance_score > 0.1:  # Lower threshold for technical terms
+                                    all_results.append(paper)
+                                    seen_ids.add(paper_id)
+
+                except Exception as e:
+                    print(f"Vector search failed for '{strategy}': {e}")
+
+                # Try keyword search in database
+                try:
+                    keyword_results = self.db.search_papers(strategy)
+                    print(
+                        f"Keyword search returned {len(keyword_results)} results")
+
+                    for result in keyword_results:
+                        paper_id = result.get('id')
+                        if paper_id and paper_id not in seen_ids:
+                            relevance_score = self._calculate_topic_relevance(
+                                result, topic)
+                            result['relevance_score'] = relevance_score
+
+                            if relevance_score > 0.1:
+                                all_results.append(result)
+                                seen_ids.add(paper_id)
+
+                except Exception as e:
+                    print(f"Keyword search failed for '{strategy}': {e}")
+
+                # If we have enough high-quality results, we can stop early
+                high_quality_results = [
+                    r for r in all_results if r.get('relevance_score', 0) > 0.5]
+                if len(high_quality_results) >= limit:
+                    break
+
+            # Sort by relevance score and return top results
+            all_results.sort(key=lambda x: x.get(
+                'relevance_score', 0), reverse=True)
+            final_results = all_results[:limit]
+
+            print(
+                f"Topic search completed. Found {len(final_results)} relevant papers.")
+            for i, result in enumerate(final_results[:3]):
+                print(
+                    f"  {i+1}. {result.get('title', 'No title')} (score: {result.get('relevance_score', 0):.3f})")
+
+            return final_results
+
+        except Exception as e:
+            print(f"Error in topic search: {e}")
+            return []
+
+    def _calculate_topic_relevance(self, result: Dict, topic: str) -> float:
+        """
+        Calculate relevance score for topic search with improved scoring.
+
+        Args:
+            result: The paper data
+            topic: The topic string
+
+        Returns:
+            Relevance score between 0 and 1
+        """
+        try:
+            score = 0.0
+            topic_lower = topic.lower()
+
+            # Get text fields
+            title = result.get('title', '').lower()
+            abstract = result.get('abstract', '').lower()
+            content = result.get('content', '').lower()
+
+            # Exact match bonuses (higher for technical terms)
+            if topic_lower in title:
+                score += 1.0
+            if topic_lower in abstract:
+                score += 0.8
+            if topic_lower in content:
+                score += 0.5
+
+            # Partial match bonuses
+            topic_words = topic_lower.split()
+            for word in topic_words:
+                if len(word) > 2:  # Skip short words
+                    if word in title:
+                        score += 0.3
+                    if word in abstract:
+                        score += 0.2
+                    if word in content:
+                        score += 0.1
+
+            # Technical term specific bonuses
+            if "tinyml" in topic_lower or "tiny ml" in topic_lower:
+                technical_terms = [
+                    "embedded", "edge", "mobile", "iot", "microcontroller",
+                    "resource constrained", "efficient", "compression",
+                    "quantization", "pruning", "distillation", "optimization",
+                    "low power", "energy efficient", "on-device"
+                ]
+
+                for term in technical_terms:
+                    if term in title:
+                        score += 0.4
+                    elif term in abstract:
+                        score += 0.3
+                    elif term in content:
+                        score += 0.1
+
+            # Conference/venue bonus for academic papers
+            venue = result.get('venue', '').lower()
+            if venue:
+                if any(conf in venue for conf in ['icml', 'nips', 'iclr', 'aaai', 'ijcai']):
+                    score += 0.2
+
+            # Year recency bonus (prefer recent papers)
+            year = result.get('year')
+            if year and isinstance(year, (int, str)):
+                try:
+                    year_int = int(year)
+                    if year_int >= 2020:
+                        score += 0.1
+                    if year_int >= 2022:
+                        score += 0.1
+                except:
+                    pass
+
+            return min(score, 2.0)  # Cap at 2.0
+
+        except Exception as e:
+            print(f"Error calculating relevance: {e}")
+            return 0.0
+
+    def _get_search_strategies(self, query: str) -> List[str]:
+        """Generate multiple search strategies for better coverage."""
+        strategies = []
+        query_lower = query.lower()
+
+        # Original query
+        strategies.append(query)
+
+        # Technical term expansions
+        if "tinyml" in query_lower:
+            strategies.extend([
+                "tiny machine learning",
+                "edge machine learning",
+                "mobile ML",
+                "embedded AI",
+                "on-device ML",
+                "resource-constrained ML",
+                "efficient neural networks",
+                "model compression",
+                "quantized neural networks"
+            ])
+
+        if "nlp" in query_lower:
+            strategies.extend([
+                "natural language processing",
+                "language models",
+                "text processing",
+                "computational linguistics"
+            ])
+
+        if "cv" in query_lower or "computer vision" in query_lower:
+            strategies.extend([
+                "image processing",
+                "visual recognition",
+                "deep learning vision",
+                "convolutional neural networks"
+            ])
+
+        # Add keyword variations
+        words = query.split()
+        if len(words) > 1:
+            # Try individual important words
+            for word in words:
+                if len(word) > 3:
+                    strategies.append(word)
+
+        # Remove duplicates while preserving order
+        seen = set()
+        unique_strategies = []
+        for strategy in strategies:
+            if strategy.lower() not in seen:
+                seen.add(strategy.lower())
+                unique_strategies.append(strategy)
+
+        return unique_strategies[:8]  # Limit to 8 strategies

@@ -1,91 +1,30 @@
-import mysql.connector
+import sqlite3
 import os
 import json
 import threading
 import logging
 from datetime import datetime
-from mysql.connector import Error
-from config.database_config import MYSQL_CONFIG
 
 
 class DatabaseManager:
     def __init__(self, config=None):
-        """Initialize the database connection with MySQL."""
-        # Start with default configuration from config file
-        self.config = MYSQL_CONFIG.copy()
+        """Initialize the database connection with SQLite."""
+        # Use SQLite database file
+        base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        self.db_path = os.path.join(base_dir, "data", "papers.db")
 
-        # Override with environment variables if set
-        if os.environ.get('MYSQL_HOST'):
-            self.config['host'] = os.environ.get('MYSQL_HOST')
-        if os.environ.get('MYSQL_DATABASE'):
-            self.config['database'] = os.environ.get('MYSQL_DATABASE')
-        if os.environ.get('MYSQL_USER'):
-            self.config['user'] = os.environ.get('MYSQL_USER')
-        if os.environ.get('MYSQL_PASSWORD'):
-            self.config['password'] = os.environ.get('MYSQL_PASSWORD')
-        if os.environ.get('MYSQL_PORT'):
-            self.config['port'] = int(os.environ.get('MYSQL_PORT'))
+        # Ensure the data directory exists
+        os.makedirs(os.path.dirname(self.db_path), exist_ok=True)
 
-        # Override with provided config if any
-        if config:
-            self.config.update(config)
-
-        logging.info(
-            f"Database connection set to: {self.config['host']}/{self.config['database']}")
+        logging.info(f"Database path set to: {self.db_path}")
         self._local = threading.local()
-        self._initialize_connection()
         self.create_tables()
-
-    def _initialize_connection(self):
-        """Initialize a thread-local connection to MySQL."""
-        if not hasattr(self._local, 'conn'):
-            try:
-                self._local.conn = mysql.connector.connect(
-                    host=self.config['host'],
-                    database=self.config['database'],
-                    user=self.config['user'],
-                    password=self.config['password'],
-                    port=self.config['port']
-                )
-                logging.info("MySQL database connection successful")
-            except Error as e:
-                logging.error(f"Error connecting to MySQL database: {e}")
-                # Try to create database if it doesn't exist
-                self._create_database_if_not_exists()
-
-    def _create_database_if_not_exists(self):
-        """Create the database if it doesn't exist."""
-        try:
-            conn = mysql.connector.connect(
-                host=self.config['host'],
-                user=self.config['user'],
-                password=self.config['password'],
-                port=self.config['port']
-            )
-            cursor = conn.cursor()
-            cursor.execute(
-                f"CREATE DATABASE IF NOT EXISTS {self.config['database']}")
-            cursor.close()
-            conn.close()
-            logging.info(
-                f"Database {self.config['database']} created successfully")
-
-            # Try to reconnect after creating the database
-            self._local.conn = mysql.connector.connect(
-                host=self.config['host'],
-                database=self.config['database'],
-                user=self.config['user'],
-                password=self.config['password'],
-                port=self.config['port']
-            )
-        except Error as e:
-            logging.error(f"Error creating database: {e}")
-            raise
 
     def _get_connection(self):
         """Get the thread-local connection, creating it if needed."""
-        if not hasattr(self._local, 'conn') or self._local.conn is None or not self._local.conn.is_connected():
-            self._initialize_connection()
+        if not hasattr(self._local, 'conn') or self._local.conn is None:
+            self._local.conn = sqlite3.connect(self.db_path)
+            self._local.conn.row_factory = sqlite3.Row  # For dictionary-like access
         return self._local.conn
 
     def create_tables(self):
@@ -96,14 +35,14 @@ class DatabaseManager:
         # Create papers table
         cursor.execute('''
         CREATE TABLE IF NOT EXISTS papers (
-            id INT AUTO_INCREMENT PRIMARY KEY,
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
             title TEXT NOT NULL,
             abstract TEXT,
             authors TEXT,
             source VARCHAR(255),
             file_path TEXT,
             embedding_id VARCHAR(255),
-            full_text LONGTEXT,
+            full_text TEXT,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
         ''')
@@ -120,7 +59,7 @@ class DatabaseManager:
 
         cursor.execute('''
         INSERT INTO papers (title, abstract, authors, source, file_path, embedding_id, full_text)
-        VALUES (%s, %s, %s, %s, %s, %s, %s)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
         ''', (title, abstract, authors_json, source, file_path, embedding_id, full_text))
 
         conn.commit()
@@ -131,52 +70,105 @@ class DatabaseManager:
     def get_paper(self, paper_id):
         """Get a paper by ID."""
         conn = self._get_connection()
-        cursor = conn.cursor(dictionary=True)
-        cursor.execute('SELECT * FROM papers WHERE id = %s', (paper_id,))
-        paper = cursor.fetchone()
+        cursor = conn.cursor()
+        cursor.execute('SELECT * FROM papers WHERE id = ?', (paper_id,))
+        row = cursor.fetchone()
         cursor.close()
 
-        if paper:
+        if row:
+            paper = dict(row)
             if paper.get('authors'):
-                paper['authors'] = json.loads(paper['authors'])
+                try:
+                    paper['authors'] = json.loads(paper['authors'])
+                except (json.JSONDecodeError, TypeError):
+                    paper['authors'] = []
             return paper
         return None
 
     def search_papers(self, keyword, limit=5):
-        """Search papers by keyword in title, abstract, or full text."""
+        """Search papers by keyword in title, abstract, or full text with case-insensitive matching."""
         conn = self._get_connection()
-        cursor = conn.cursor(dictionary=True)
+        cursor = conn.cursor()
         keyword_pattern = f'%{keyword}%'
         cursor.execute('''
         SELECT * FROM papers 
-        WHERE title LIKE %s OR abstract LIKE %s OR full_text LIKE %s
-        ORDER BY created_at DESC LIMIT %s
+        WHERE LOWER(title) LIKE LOWER(?) OR LOWER(abstract) LIKE LOWER(?) OR LOWER(full_text) LIKE LOWER(?)
+        ORDER BY created_at DESC LIMIT ?
         ''', (keyword_pattern, keyword_pattern, keyword_pattern, limit))
 
-        results = cursor.fetchall()
+        rows = cursor.fetchall()
         cursor.close()
 
-        # Parse authors field
-        for paper in results:
+        results = []
+        for row in rows:
+            paper = dict(row)
             if paper.get('authors'):
-                paper['authors'] = json.loads(paper['authors'])
+                try:
+                    paper['authors'] = json.loads(paper['authors'])
+                except (json.JSONDecodeError, TypeError):
+                    paper['authors'] = []
+            results.append(paper)
 
         return results
+
+    def find_paper_by_title_fuzzy(self, title_query, threshold=0.7):
+        """Find papers by title using fuzzy matching for better results."""
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        cursor.execute('SELECT * FROM papers')
+        rows = cursor.fetchall()
+        cursor.close()
+
+        # Parse authors field and calculate similarity scores
+        from difflib import SequenceMatcher
+        matches = []
+        title_query_lower = title_query.lower().strip()
+
+        for row in rows:
+            paper = dict(row)
+            if paper.get('authors'):
+                try:
+                    paper['authors'] = json.loads(paper['authors'])
+                except (json.JSONDecodeError, TypeError):
+                    paper['authors'] = []
+
+            paper_title_lower = paper['title'].lower().strip()
+
+            # Calculate similarity score
+            similarity = SequenceMatcher(
+                None, title_query_lower, paper_title_lower).ratio()
+
+            # Also check if the query is contained within the title (substring match)
+            contains_match = title_query_lower in paper_title_lower or paper_title_lower in title_query_lower
+
+            if similarity >= threshold or contains_match:
+                paper['similarity_score'] = similarity
+                matches.append(paper)
+
+        # Sort by similarity score (highest first)
+        matches.sort(key=lambda x: x.get('similarity_score', 0), reverse=True)
+
+        return matches
 
     def get_all_papers(self, limit=10):
         """Get all papers with optional limit."""
         conn = self._get_connection()
-        cursor = conn.cursor(dictionary=True)
+        cursor = conn.cursor()
         cursor.execute(
-            'SELECT * FROM papers ORDER BY created_at DESC LIMIT %s', (limit,))
+            'SELECT * FROM papers ORDER BY created_at DESC LIMIT ?', (limit,))
 
-        results = cursor.fetchall()
+        rows = cursor.fetchall()
         cursor.close()
 
-        # Parse authors field
-        for paper in results:
+        results = []
+        for row in rows:
+            paper = dict(row)
             if paper.get('authors'):
-                paper['authors'] = json.loads(paper['authors'])
+                try:
+                    paper['authors'] = json.loads(paper['authors'])
+                except (json.JSONDecodeError, TypeError):
+                    paper['authors'] = []
+            results.append(paper)
 
         return results
 
@@ -195,7 +187,7 @@ class DatabaseManager:
 
             # First, get the paper to retrieve file path before deletion
             cursor.execute(
-                'SELECT file_path FROM papers WHERE id = %s', (paper_id,))
+                'SELECT file_path FROM papers WHERE id = ?', (paper_id,))
             result = cursor.fetchone()
 
             if not result:
@@ -205,20 +197,19 @@ class DatabaseManager:
             file_path = result[0]
 
             # Delete the paper from the database
-            cursor.execute('DELETE FROM papers WHERE id = %s', (paper_id,))
+            cursor.execute('DELETE FROM papers WHERE id = ?', (paper_id,))
             conn.commit()
             cursor.close()
 
             return True, file_path
-        except Error as e:
+        except Exception as e:
             logging.error(f"Error deleting paper: {e}")
             return False, str(e)
 
     def close(self):
         """Close the database connection."""
         if hasattr(self._local, 'conn') and self._local.conn:
-            if self._local.conn.is_connected():
-                self._local.conn.close()
+            self._local.conn.close()
             self._local.conn = None
 
     def __del__(self):

@@ -2,9 +2,19 @@ import os
 import logging
 from typing import List, Dict, Any, Optional
 
-# LangChain imports
-from langchain_community.vectorstores import Chroma
-from langchain_community.embeddings import HuggingFaceEmbeddings
+# Updated LangChain imports to fix deprecation warnings
+try:
+    from langchain_chroma import Chroma
+except ImportError:
+    # Fallback to community version if chroma package not available
+    from langchain_community.vectorstores import Chroma
+
+try:
+    from langchain_huggingface import HuggingFaceEmbeddings
+except ImportError:
+    # Fallback to community version if huggingface package not available
+    from langchain_community.embeddings import HuggingFaceEmbeddings
+
 from langchain_core.documents import Document
 
 # Keep compatibility with existing code
