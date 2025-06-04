@@ -11,8 +11,7 @@ marp: true
 
 ## Research Paper Assistant: Your AI-Powered Research Companion
 
-**Euhid Aman (M11315803)**  
-**Alexander Morinvil (M11352802)**
+**Euhid Aman (M11315803)**
 
 **Questions & Feedback Welcome**
 
